@@ -1,0 +1,31 @@
+.vscode
+__pycache__
+team_1518207_data23_24
+
+# Raw season data folders (source: Vaastav FPL repo)
+data/2016-17/
+data/2017-18/
+data/2018-19/
+data/2019-20/
+data/2020-21/
+data/2021-22/
+data/2022-23/
+data/2023-24/
+data/2024-25/
+data/2025-26/
+data/master_team_list.csv
+data/cleaned_merged_seasons*.csv
+
+# Keep the processed output
+!data/processed_fpl_data.csv
+
+# Python / env
+.venv/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
