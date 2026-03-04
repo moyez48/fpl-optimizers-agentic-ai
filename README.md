@@ -14,9 +14,8 @@ Each agent has a defined role:
 | Agent | Responsibility |
 |-------|---------------|
 | **Statistician** | Predicts GW points using XGBoost and feature-engineered historical data |
-| **Transfer** | Evaluates transfer options against budget and fixture run |
-| **Captain** | Selects the optimal armband based on predicted ceiling and consistency |
-| **Scout** | Surfaces differential picks and injured / rotating player alerts |
+| **Sporting Director** | Evaluates transfer options against budget and fixture run |
+| **Manager** | Selects the optimal armband based on predicted ceiling and consistency |
 
 We are currently in **Weeks 1-2** - building and evaluating the Statistician Agent's ML foundation.
 
