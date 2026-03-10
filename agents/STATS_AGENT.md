@@ -14,7 +14,7 @@ The Stats Agent is the **data engine** of the FPL Optimizer. It is responsible f
 4. Estimating start probability per player
 5. Ranking players overall and by position
 6. Delivering a structured payload to the Sporting Director Agent
-
+1
 The Stats Agent does **not** make transfer or team selection decisions. It produces data — the downstream agents decide.
 
 ---
