@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: #1A1A2E;
+  color: #EAEAEA;
+  font-family: 'Inter', sans-serif;
+  min-height: 100vh;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #16213E;
+}
+::-webkit-scrollbar-thumb {
+  background: #0F3460;
+  border-radius: 3px;
+}
+
+/* Range slider thumb */
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #00FF87;
+  cursor: pointer;
+  box-shadow: 0 0 6px rgba(0,255,135,0.5);
+}
+input[type='range']::-webkit-slider-runnable-track {
+  background: #0F3460;
+  border-radius: 4px;
+  height: 6px;
+}
+input[type='range'] {
+  -webkit-appearance: none;
+  width: 100%;
+  background: transparent;
+}
+
+/* Animate progress bar fill */
+@keyframes fillBar {
+  from { width: 0% }
+  to   { width: var(--target-width) }
+}
+
+.bar-animate {
+  animation: fillBar 1.2s ease-out forwards;
+}
+
+/* Pulse dot */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+.pulse-dot {
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
