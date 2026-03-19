@@ -1,0 +1,36 @@
+name: Weekly FPL Data Update
+
+# This tells GitHub WHEN to run the script
+on:
+  schedule:
+    # Runs at 00:00 UTC every Thursday
+    - cron: '0 0 * * 4'
+  workflow_dispatch: # Adds a button so you can run it manually anytime
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install pandas requests xgboost scikit-learn
+
+      - name: Run Data Update Script
+        run: python update_data.py
+
+      - name: Commit and Push new CSV
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add data/processed_fpl_data.csv
+          git commit -m "Auto-update FPL features for new Gameweek" || echo "No changes to commit"
+          git push
