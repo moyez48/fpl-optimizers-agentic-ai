@@ -62,6 +62,21 @@ class PlayerProfile:
     # Availability (False = injured/suspended, exclude from buy targets)
     is_available: bool = True
 
+    # FPL price tracking (required for sell price lock rule)
+    purchase_price: float = 0.0   # Price paid when player was bought, £m
+    sell_price:     float = 0.0   # Computed by SquadValidator.compute_sell_price()
+
+    # FPL availability detail (sourced from bootstrap["elements"] by element ID)
+    status:             str = "a"   # a / d / i / s / u
+    chance_of_playing:  int = 100   # 0–100
+    yellow_cards:       int = 0     # Season yellow card total
+
+    # Form stats (sourced from Stats Agent form_stats by element)
+    avg_minutes_last5: float = 0.0   # Average minutes in last 5 GWs
+    ewm_points:        float = 0.0   # Exponentially weighted recent form
+    std_pts_last5:     float = 0.0   # Std deviation of points over last 5 GWs
+    blank_rate_last5:  float = 0.0   # Proportion of last 5 GWs where minutes = 0
+
     # Populated by FixtureAnalyser
     fixture_scores:          List[float] = field(default_factory=list)
     fixture_weighted_score:  float = 0.0
@@ -188,11 +203,39 @@ class TransferOption:
     transfer_cost_points: int    # 0 if free transfer, 4 per hit
     net_expected_gain:    float  # expected_gain - transfer_cost_points
 
-    # Composite ranking score
+    # Composite ranking score (legacy weighted scorer)
     score: float
 
-    # Human-readable summary (Claude expands this in Weeks 3-4)
-    reasoning: str
+    # VORP-based ranking (primary ranking signal per spec §5)
+    sell_vorp_score:    float = 0.0
+    buy_vorp_score:     float = 0.0
+    vorp_gain:          float = 0.0   # buy_vorp - sell_vorp; primary sort key
+    budget_unlock_flag: bool  = False  # True if T1 proceeds made this T2 affordable
+    transfer_number:    int   = 1      # 1 = single or T1, 2 = T2 in a pair
+
+    # Human-readable summary
+    reasoning: str = ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SQUAD HEALTH
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class SquadHealthRecord:
+    """
+    Per-player health breakdown produced by SquadHealthAnalyser.
+
+    Each dimension surfaces raw signals. Flags are explicit alerts for the
+    Manager Agent to act on. No composite score — dimensions are kept separate.
+    """
+    name: str
+    availability: dict   # status, chance_of_playing, is_available, yellow_cards
+    rotation_risk: dict  # start_prob, avg_minutes_last5, blank_rate_last5
+    form:          dict  # avg_pts_last5, ewm_points
+    volatility:    dict  # std_pts_last5
+    fixture:       dict  # has_blank_gw, has_double_gw
+    flags:         List[str] = field(default_factory=list)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -205,18 +248,28 @@ class TransferRecommendation:
     Final output of the Sporting Director Agent for one gameweek.
     This is the payload consumed by the Manager Agent and the frontend API.
 
-    recommended_transfers: ordered best-first.
-    wildcard_flag: True if the agent detects the squad is broadly weak enough
-                   to justify activating the wildcard chip.
-    hold_flag: True if the best available transfer gains < 2 expected pts —
-               better to hold the free transfer and bank it.
-    summary: one-paragraph explanation stub — Claude fills this in Weeks 3-4.
+    squad_health:          Per-player health breakdown (see SquadHealthRecord).
+    recommended_transfers: Ordered best-first; single and multi-transfer options.
+    wildcard_flag:         True if 5+ squad players have 2+ health flags.
+    hold_flag:             True if no transfer passed the expected-gain gate.
+    sd_summary:            Structured briefing stub for the Manager Agent.
+    sd_log:                Execution log entries from all nodes.
     """
-    gameweek:              int
+    gameweek:                 int
     free_transfers_available: int
-    bank:                  float
-    recommended_transfers: List[TransferOption]   # best-first
-    wildcard_flag:         bool
-    hold_flag:             bool
-    summary:               str
-    log:                   List[str] = field(default_factory=list)
+    bank:                     float
+    squad_health:             List[SquadHealthRecord]
+    recommended_transfers:    List[TransferOption]   # best-first
+    wildcard_flag:            bool
+    hold_flag:                bool
+    sd_summary:               str
+    sd_log:                   List[str] = field(default_factory=list)
+
+    # Legacy alias so existing code calling .summary / .log still works
+    @property
+    def summary(self) -> str:
+        return self.sd_summary
+
+    @property
+    def log(self) -> List[str]:
+        return self.sd_log

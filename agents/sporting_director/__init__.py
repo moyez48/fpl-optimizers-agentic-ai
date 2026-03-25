@@ -8,42 +8,33 @@ Exports:
   - sporting_director_node  : LangGraph node function (state dict → state dict)
   - run_sporting_director   : convenience runner (no LangGraph setup needed)
 
-LangGraph state contract
--------------------------
+LangGraph state contract (per FPLOptimizerState spec §9)
+---------------------------------------------------------
 The Sporting Director node reads these keys from state:
-    state["ranked"]     : dict — Stats Agent ranked player output
-    state["bootstrap"]  : dict — FPL bootstrap-static JSON
-    state["gameweek"]   : int  — current gameweek (prediction was made for this GW)
-    state["squad"]      : dict — serialised Squad (see Squad dataclass)
-    state["bank"]       : float (optional, default 0.0) — £m in bank
-    state["free_transfers"] : int (optional, default 1)
+    state["ranked"]         : dict  — Stats Agent ranked player output
+    state["bootstrap"]      : dict  — FPL bootstrap-static JSON
+    state["gameweek"]       : int   — current gameweek
+    state["form_stats"]     : list  — per-player form records (optional)
+    state["squad"]          : Squad | dict — manager's current 15-player squad
+    state["bank"]           : float — £m in bank (default 0.0)
+    state["free_transfers"] : int   — free transfers available (default 1)
+    state["sd_top_n"]       : int   — max single-transfer recs (default 10)
+    state["sd_window"]      : int   — fixture window in GWs (default 5)
 
-The node writes these keys back:
-    state["transfer_recommendation"] : dict — serialised TransferRecommendation
-    state["sd_summary"]              : str  — one-line summary (for Manager Agent)
-    state["sd_log"]                  : list[str] — execution log
+The node writes these keys back (per spec §9):
+    state["squad_health"]          : list[dict] — per-player health breakdown
+    state["recommended_transfers"] : list[dict] — serialised TransferOptions
+    state["wildcard_flag"]         : bool
+    state["hold_flag"]             : bool
+    state["sd_summary"]            : str  — briefing stub for Manager Agent
+    state["sd_log"]                : list[str] — execution log
 
 Standalone usage (no LangGraph)
 ---------------------------------
     from agents.sporting_director import run_sporting_director
     from agents.sporting_director.schemas import Squad, PlayerProfile
-    from agents.stats_agent import run_stats_agent
 
-    # Run Stats Agent first
-    stats_result = run_stats_agent(gameweek=29, season="2025-26")
-
-    # Define your squad
-    squad = Squad(
-        players=[
-            PlayerProfile.from_ranked_player(p)
-            for p in your_15_player_records
-        ],
-        bank=2.5,
-        free_transfers=1,
-        gameweek=29,
-    )
-
-    # Run Sporting Director
+    squad = Squad(players=[...], bank=2.5, free_transfers=1, gameweek=29)
     recommendation = run_sporting_director(stats_result, squad)
     for transfer in recommendation.recommended_transfers[:3]:
         print(transfer.reasoning)
@@ -55,7 +46,7 @@ import dataclasses
 from typing import Optional
 
 from .sporting_director import SportingDirectorAgent
-from .schemas import Squad, PlayerProfile, TransferRecommendation
+from .schemas import Squad, PlayerProfile, TransferRecommendation, SquadHealthRecord
 
 
 # ── Convenience runner (no LangGraph required) ────────────────────────────────
@@ -112,13 +103,23 @@ def sporting_director_node(state: dict) -> dict:
 
         # ── Run agent ─────────────────────────────────────────────────────
         agent = SportingDirectorAgent(
-            top_n  = state.get("sd_top_n", 10),
-            window = state.get("sd_window", 5),
+            top_n           = state.get("sd_top_n", 10),
+            window          = state.get("sd_window", 5),
+            replacement_pct = state.get("vorp_replacement_pct", 20),
+            t1_candidates   = state.get("t1_candidates", 3),
+            max_transfers   = state.get("max_transfers", 2),
         )
         recommendation = agent.evaluate(state, squad)
 
-        # ── Serialise result ──────────────────────────────────────────────
-        rec_dict = dataclasses.asdict(recommendation)
+        # ── Serialise health records ───────────────────────────────────────
+        squad_health_dicts = [
+            dataclasses.asdict(h) for h in recommendation.squad_health
+        ]
+
+        # ── Serialise transfer options ─────────────────────────────────────
+        transfer_dicts = [
+            dataclasses.asdict(t) for t in recommendation.recommended_transfers
+        ]
 
         log.append(
             f"sporting_director_node: complete — "
@@ -126,12 +127,16 @@ def sporting_director_node(state: dict) -> dict:
             f"hold={recommendation.hold_flag}, wildcard={recommendation.wildcard_flag}"
         )
 
+        # ── Write spec §9 state fields ────────────────────────────────────
         return {
             **state,
-            "transfer_recommendation": rec_dict,
-            "sd_summary":              recommendation.summary,
-            "sd_log":                  recommendation.log,
-            "log":                     log,
+            "squad_health":          squad_health_dicts,
+            "recommended_transfers": transfer_dicts,
+            "wildcard_flag":         recommendation.wildcard_flag,
+            "hold_flag":             recommendation.hold_flag,
+            "sd_summary":            recommendation.sd_summary,
+            "sd_log":                recommendation.sd_log,
+            "log":                   log,
         }
 
     except Exception as e:
@@ -181,4 +186,5 @@ __all__ = [
     "SportingDirectorAgent",
     "run_sporting_director",
     "sporting_director_node",
+    "SquadHealthRecord",
 ]

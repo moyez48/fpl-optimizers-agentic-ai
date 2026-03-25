@@ -16,6 +16,7 @@ FPL rules enforced:
 
 from __future__ import annotations
 
+import math
 from typing import List, Tuple
 
 from .schemas import (
@@ -34,6 +35,35 @@ class SquadValidator:
         if valid:
             scorer.score_transfer(...)
     """
+
+    def compute_sell_price(self, player: PlayerProfile) -> float:
+        """
+        Compute the FPL sell price for a squad player, applying the price lock rule.
+
+        FPL only allows managers to recover 50% of any price rise (rounded down
+        to the nearest £0.1m). Full losses are borne by the seller.
+
+        Formula:
+            if current > purchase:
+                sell = purchase + floor((current - purchase) * 10 / 2) / 10
+            else:
+                sell = current
+
+        The result is stored on player.sell_price and also returned.
+        Requires player.purchase_price to be set; if 0.0, assumes no price change.
+        """
+        current  = player.cost
+        purchased = player.purchase_price if player.purchase_price > 0 else current
+
+        if current > purchased:
+            gain = current - purchased
+            locked_gain = math.floor(gain * 10 / 2) / 10
+            sell_price  = round(purchased + locked_gain, 1)
+        else:
+            sell_price = round(current, 1)
+
+        player.sell_price = sell_price
+        return sell_price
 
     def validate_squad(self, squad: Squad) -> Tuple[bool, List[str]]:
         """
@@ -107,12 +137,13 @@ class SquadValidator:
                 f"buying {buy.position} ({buy.name})"
             )
 
-        # 4. Budget
+        # 4. Budget (use sell_price after price-lock; fall back to cost if not set)
         if not self.can_afford(squad, sell, buy):
-            shortfall = round(buy.cost - (squad.bank + sell.cost), 1)
+            effective_sell = sell.sell_price if sell.sell_price > 0 else sell.cost
+            shortfall = round(buy.cost - (squad.bank + effective_sell), 1)
             violations.append(
                 f"Cannot afford: buy £{buy.cost}m, bank £{squad.bank}m + "
-                f"sell £{sell.cost}m = £{round(squad.bank + sell.cost, 1)}m "
+                f"sell £{effective_sell}m = £{round(squad.bank + effective_sell, 1)}m "
                 f"(short by £{shortfall}m)"
             )
 
@@ -133,9 +164,24 @@ class SquadValidator:
     def can_afford(self, squad: Squad, sell: PlayerProfile, buy: PlayerProfile) -> bool:
         """
         True if the transfer is affordable given current bank and sell price.
+
+        Uses sell.sell_price (after the FPL price-lock rule) when set.
+        Falls back to sell.cost if sell_price has not been computed yet.
         Uses a small epsilon (0.01) to handle floating-point rounding.
         """
-        available = round(squad.bank + sell.cost, 2)
+        effective_sell = sell.sell_price if sell.sell_price > 0 else sell.cost
+        available = round(squad.bank + effective_sell, 2)
+        return available >= buy.cost - 0.01
+
+    def can_afford_with_bank(
+        self, bank: float, sell: PlayerProfile, buy: PlayerProfile
+    ) -> bool:
+        """
+        Affordability check using an explicit bank value (for multi-transfer
+        simulation where bank has already been updated after T1).
+        """
+        effective_sell = sell.sell_price if sell.sell_price > 0 else sell.cost
+        available = round(bank + effective_sell, 2)
         return available >= buy.cost - 0.01
 
     def get_buyable_players(
@@ -159,12 +205,13 @@ class SquadValidator:
 
     def get_sellable_players(self, squad: Squad) -> List[PlayerProfile]:
         """
-        Returns all squad players who can be considered for sale.
+        Returns all 15 squad players with sell_price populated on each.
 
-        Currently all 15 — selling price lock logic (where you can only
-        sell at purchase price if value has risen) is not implemented yet
-        as it requires tracking individual purchase prices.
+        Calls compute_sell_price() for each player so downstream budget
+        checks always use the price-lock-adjusted sell price, not cost.
         """
+        for player in squad.players:
+            self.compute_sell_price(player)
         return list(squad.players)
 
     def club_counts_after_transfer(

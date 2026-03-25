@@ -261,6 +261,16 @@ class FixtureAnalyser:
     def get_log(self) -> List[str]:
         return list(self._log)
 
+    def get_fixture_data(self) -> Dict[str, Dict[int, list]]:
+        """
+        Return the internal fixture dict for consumption by SquadHealthAnalyser.
+
+        Structure: {team_name: {gameweek: [FixtureRating, ...]}}
+        An empty dict is returned if fetch_fixtures() has not been called yet
+        or failed.
+        """
+        return dict(self._fixtures)
+
     def fixture_summary(self, team: str, from_gameweek: int, window: int = 5) -> str:
         """
         Human-readable fixture run for a team.
