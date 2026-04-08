@@ -201,7 +201,7 @@ _CACHE_TTL = 3600
 
 # Bump when the /api/stats response schema changes so stale cached payloads
 # (e.g. missing actual_points) are not served.
-_CACHE_SCHEMA_VER = "20250401f"
+_CACHE_SCHEMA_VER = "20250409a"
 
 
 def _get_or_run_agent(season: str, gameweek: int | None) -> dict:
@@ -372,14 +372,17 @@ def get_stats(req: StatsRequest):
         })
 
     payload = {
-        "gameweek":             result.get("gameweek"),
-        "season":               result.get("season"),
-        "ranked":               result.get("ranked", {}),
-        "captain_shortlist":    enriched_captains,
-        "form_stats":           result.get("form_stats", []),
-        "gw_has_actual_scores": result.get("gw_has_actual_scores", False),
-        "injury_alerts":        injury_alerts,
-        "log":                  result.get("log", []),
+        "gameweek":               result.get("gameweek"),
+        "season":                 result.get("season"),
+        "ranked":                 result.get("ranked", {}),
+        "captain_shortlist":      enriched_captains,
+        "form_stats":             result.get("form_stats", []),
+        "gw_has_actual_scores":   result.get("gw_has_actual_scores", False),
+        "actual_scores_source":   result.get("actual_scores_source"),
+        "dataset_gw_min":         result.get("dataset_gw_min"),
+        "dataset_gw_max":         result.get("dataset_gw_max"),
+        "injury_alerts":          injury_alerts,
+        "log":                    result.get("log", []),
     }
     return _to_json(payload)
 

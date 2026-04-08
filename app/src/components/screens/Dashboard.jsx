@@ -81,9 +81,11 @@ export default function Dashboard({ agentData = null, userInput = null, onReset 
           <p className="text-[10px] text-fpl_text/40">{squadValue != null ? '15-player squad' : 'Import FPL team'}</p>
         </div>
         <div className="bg-card rounded-xl p-3 border border-white/5">
-          <p className="text-[10px] text-fpl_text/40 uppercase tracking-widest">Injury Alerts</p>
+          <p className="text-[10px] text-fpl_text/40 uppercase tracking-widest">Squad injury flags</p>
           <p className="text-base font-black text-danger">{agentData.injuryAlerts?.length ?? 0}</p>
-          <p className="text-[10px] text-fpl_text/40">FPL injured/doubtful</p>
+          <p className="text-[10px] text-fpl_text/40">
+            {isSquadSpecific ? 'Your 15 only · see Manager tab' : 'Import FPL team'}
+          </p>
         </div>
         <div className="bg-card rounded-xl p-3 border border-white/5">
           <p className="text-[10px] text-fpl_text/40 uppercase tracking-widest">Players Ranked</p>

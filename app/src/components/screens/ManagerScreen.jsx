@@ -103,6 +103,42 @@ export default function ManagerScreen({ agentData = null, userInput = null }) {
         </div>
       </div>
 
+      {/* Squad-only injury / availability (live import) */}
+      {userInput?.isLiveData && (
+        <div className="bg-amber/10 border border-amber/25 rounded-xl p-4">
+          <p className="text-amber font-bold text-xs mb-1">⚠️ Your squad — injury &amp; availability</p>
+          <p className="text-[10px] text-fpl_text/40 mb-3">
+            FPL status for your 15 players this gameweek. Full league list: official FPL app.
+          </p>
+          {(agentData?.injuryAlerts?.length ?? 0) > 0 ? (
+            <div className="flex flex-col gap-1.5">
+              {agentData.injuryAlerts.map(p => (
+                <div key={p.id} className="flex items-start gap-2">
+                  <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded shrink-0 mt-0.5
+                    ${p.statusCode === 'i' ? 'bg-danger/30 text-danger' :
+                      p.statusCode === 's' ? 'bg-danger/30 text-danger' :
+                      'bg-amber/30 text-amber'}`}>
+                    {p.statusLabel}
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-xs text-amber/90 font-semibold flex flex-wrap gap-1">
+                      {p.name}
+                      <span className="text-amber/50 font-normal"> · {p.position} · {p.team}</span>
+                      {p.startProb != null && (
+                        <span className="text-amber/50 font-normal"> · {(p.startProb * 100).toFixed(0)}% chance</span>
+                      )}
+                    </p>
+                    {p.news && <p className="text-[10px] text-amber/50 truncate">{p.news}</p>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-[11px] text-fpl_text/45">No flagged players in your squad for this round.</p>
+          )}
+        </div>
+      )}
+
       {/* Tabs */}
       <div className="flex gap-1 bg-card rounded-xl p-1 border border-white/5">
         {TABS.map((t, i) => (

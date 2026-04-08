@@ -65,6 +65,7 @@ if ANALYSIS_DIR not in sys.path:
 
 FPL_BOOTSTRAP_URL = "https://fantasy.premierleague.com/api/bootstrap-static/"
 FPL_FIXTURES_URL  = "https://fantasy.premierleague.com/api/fixtures/"
+FPL_EVENT_LIVE_TMPL = "https://fantasy.premierleague.com/api/event/{}/live/"
 
 # ── Features (must match exactly what the model was trained on) ───────────────
 with open(META_PATH) as f:
@@ -96,6 +97,9 @@ class StatsAgentState(TypedDict):
     ranked: Optional[dict]           # {GK: [...], DEF: [...], MID: [...], FWD: [...], ALL: [...]}
     captain_shortlist: Optional[list] # Top 5 captain candidates
     gw_has_actual_scores: Optional[bool]  # True if CSV has scored pts for this GW
+    actual_scores_source: Optional[str]   # "fpl_event_live" | "csv_sanitised" | "none"
+    dataset_gw_min: Optional[int]
+    dataset_gw_max: Optional[int]
 
     # ── Control ───────────────────────────────────────────────────────────────
     error: Optional[str]             # Set by any node on failure
@@ -141,6 +145,52 @@ def fetch_live_data(state: StatsAgentState) -> StatsAgentState:
 def _norm_player_name(s: str) -> str:
     """Unicode-normalise for matching CSV `name` to FPL `web_name`."""
     return unicodedata.normalize("NFKC", (s or "").strip()).casefold()
+
+
+def fetch_fpl_event_live_points(event_id: int, timeout: float = 20.0) -> dict[int, float]:
+    """
+    Official per-player gameweek scores from FPL (supports negatives, e.g. -1).
+
+    GET /api/event/{event_id}/live/ → elements[].stats.total_points
+    """
+    url = FPL_EVENT_LIVE_TMPL.format(int(event_id))
+    try:
+        r = requests.get(url, timeout=timeout)
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        return {}
+    out: dict[int, float] = {}
+    for row in data.get("elements") or []:
+        eid = row.get("id")
+        st = row.get("stats") or {}
+        if eid is None:
+            continue
+        tp = st.get("total_points")
+        if tp is None:
+            continue
+        try:
+            out[int(eid)] = float(tp)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+# Single-gameweek scores only (FPL live is authoritative). CSV rows sometimes carry
+# season/cumulative totals in `total_points` after merges — those must not pass as "this GW".
+_SINGLE_GW_ACTUAL_MIN = -25.0
+_SINGLE_GW_ACTUAL_MAX = 30.0
+
+
+def _actual_points_from_csv_fallback(series: pd.Series) -> pd.Series:
+    """
+    Use CSV `total_points` only when FPL /event/{{gw}}/live/ is unavailable.
+
+    Tight bounds reject season aggregates (e.g. 82) mistaken for one week.
+    """
+    ap = pd.to_numeric(series, errors="coerce")
+    ap = ap.where((ap >= _SINGLE_GW_ACTUAL_MIN) & (ap <= _SINGLE_GW_ACTUAL_MAX))
+    return ap
 
 
 def _enrich_predictions_with_bootstrap(
@@ -599,10 +649,21 @@ def engineer_features(state: StatsAgentState) -> StatsAgentState:
 
         log.append(f"engineer_features: {df.shape[1]} columns after FE")
 
+        season = state["season"]
+        sdf = df[df["season"] == season]
+        gw_min = int(sdf["GW"].min()) if len(sdf) else None
+        gw_max = int(sdf["GW"].max()) if len(sdf) else None
+
     except Exception as e:
         return {**state, "error": f"engineer_features: {e}", "log": log}
 
-    return {**state, "feature_df": df, "log": log}
+    return {
+        **state,
+        "feature_df": df,
+        "dataset_gw_min": gw_min,
+        "dataset_gw_max": gw_max,
+        "log": log,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -631,6 +692,18 @@ def run_model(state: StatsAgentState) -> StatsAgentState:
             target_gw = int(season_df["GW"].max())
 
         pred_df = season_df[season_df["GW"] == target_gw].copy()
+
+        if pred_df.empty:
+            mx = int(season_df["GW"].max()) if len(season_df) else 0
+            return {
+                **state,
+                "error": (
+                    f"run_model: no feature rows for {season} GW{target_gw}. "
+                    f"Dataset currently has GW1–GW{mx}. "
+                    f"Refresh processed data to add this gameweek, or pick GW1–GW{mx}."
+                ),
+                "log": log,
+            }
 
         # Fill any missing features with 0 (conservative default)
         missing = [f for f in FEATURES if f not in pred_df.columns]
@@ -792,6 +865,7 @@ def rank_players(state: StatsAgentState) -> StatsAgentState:
     if state.get("error"):
         return state
 
+    actual_scores_source = "none"
     try:
         preds  = pd.DataFrame(state["predictions"])
         preds  = _patch_preds_identity_from_bootstrap(preds, state.get("bootstrap"))
@@ -825,14 +899,38 @@ def rank_players(state: StatsAgentState) -> StatsAgentState:
         # Authoritative GK/DEF/MID/FWD from FPL element_type (fixes blank CSV + UI buckets)
         preds = _assign_fpl_identity_from_element(preds, state.get("bootstrap"))
 
-        # Realised FPL points for this GW (once the gameweek exists in the dataset)
+        # Realised points: prefer official FPL /api/event/{gw}/live/ (supports negatives, e.g. -1).
+        # Gap-fill from CSV only where FPL has no value; CSV is loosely sanitised (drops absurd values).
+        gw_id = int(state["gameweek"])
+        fpl_live = fetch_fpl_event_live_points(gw_id)
+        el = pd.to_numeric(preds["element"], errors="coerce")
+
+        def _fpl_lookup(e: Any) -> float:
+            if pd.isna(e):
+                return np.nan
+            try:
+                return float(fpl_live.get(int(float(e)), np.nan))
+            except (TypeError, ValueError):
+                return np.nan
+
+        ap = el.apply(_fpl_lookup) if len(fpl_live) > 0 else pd.Series(np.nan, index=preds.index)
+        actual_scores_source = "fpl_event_live" if len(fpl_live) > 0 else "none"
+
         if "total_points" in preds.columns:
-            ap = pd.to_numeric(preds["total_points"], errors="coerce")
-            preds["actual_points"] = ap
-            gw_has_actual = bool(ap.notna().any())
-        else:
-            preds["actual_points"] = np.nan
-            gw_has_actual = False
+            csv_ap = _actual_points_from_csv_fallback(preds["total_points"])
+            if len(fpl_live) == 0:
+                ap = csv_ap
+                actual_scores_source = "csv_sanitised"
+            # When live exists, do NOT combine_first from CSV: gap-fill was mixing
+            # official GW totals with bad merged season/cumulative values (e.g. 82, 50).
+            # Missing FPL rows stay NaN (wrong element id, etc.).
+
+        preds["actual_points"] = ap
+        gw_has_actual = bool(preds["actual_points"].notna().any())
+        log.append(
+            f"rank_players: actual_scores_source={actual_scores_source} "
+            f"(FPL keys={len(fpl_live)})"
+        )
 
         # Sort by expected_pts descending
         preds = preds.sort_values("expected_pts", ascending=False).reset_index(drop=True)
@@ -871,6 +969,7 @@ def rank_players(state: StatsAgentState) -> StatsAgentState:
         "ranked": ranked,
         "captain_shortlist": captain_shortlist,
         "gw_has_actual_scores": gw_has_actual,
+        "actual_scores_source": actual_scores_source,
         "log": log,
     }
 
@@ -1030,6 +1129,9 @@ def run_stats_agent(gameweek: int | None = None, season: str | None = None) -> d
         "ranked": None,
         "captain_shortlist": None,
         "gw_has_actual_scores": None,
+        "actual_scores_source": None,
+        "dataset_gw_min": None,
+        "dataset_gw_max": None,
         "error": None,
         "log": [],
     }

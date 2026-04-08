@@ -1,10 +1,18 @@
-import React, { useState, useRef } from 'react'
+import React, { useState, useRef, useCallback } from 'react'
 import InputScreen   from './components/screens/InputScreen'
 import LoadingScreen  from './components/screens/LoadingScreen'
 import StatsScreen    from './components/screens/StatsScreen'
 import ManagerScreen  from './components/screens/ManagerScreen'
 import Dashboard      from './components/screens/Dashboard'
-import { fetchStats, adaptToStatsOutput, fetchTransfers, adaptToTransferOutput, fetchManager, adaptToManagerOutput } from './services/statsAgent'
+import {
+  fetchStats,
+  adaptToStatsOutput,
+  fetchTransfers,
+  adaptToTransferOutput,
+  fetchManager,
+  adaptToManagerOutput,
+  parseDatasetGwMaxFromStatsError,
+} from './services/statsAgent'
 
 // App screens in order
 const SCREENS = {
@@ -26,6 +34,9 @@ export default function App() {
   const [userInput, setUserInput] = useState(null)
   const [agentData, setAgentData] = useState(null)
   const [agentError, setAgentError] = useState(null)
+  const [statsGwLoading, setStatsGwLoading] = useState(false)
+  /** Upper GW bound for the CSV/model (from API or inferred when a bad GW request fails). */
+  const [gwDatasetCap, setGwDatasetCap] = useState(null)
 
   // Holds the in-flight API promises so LoadingScreen can await them
   const statsPromiseRef     = useRef(null)
@@ -108,6 +119,9 @@ export default function App() {
         adapted.planningGameweek = adapted.transferRecommendation.planningGameweek
       }
 
+      if (adapted.datasetMaxGw != null) {
+        setGwDatasetCap(adapted.datasetMaxGw)
+      }
       setAgentData(adapted)
     } catch (err) {
       setAgentError(err.message ?? String(err))
@@ -120,7 +134,76 @@ export default function App() {
     setUserInput(null)
     setAgentData(null)
     setAgentError(null)
+    setStatsGwLoading(false)
+    setGwDatasetCap(null)
   }
+
+  const handleStatsGameweekChange = useCallback(async (gw) => {
+    const ui = userInputRef.current
+    if (!ui || gw == null || Number.isNaN(Number(gw))) return
+    const g = Number(gw)
+    const max = gwDatasetCap ?? agentData?.datasetMaxGw
+    if (max != null && g > max) {
+      setAgentError(
+        `GW${g} is not in the dataset yet (available: GW1–GW${max}). Refresh data after that gameweek is processed.`,
+      )
+      return
+    }
+    setStatsGwLoading(true)
+    setAgentError(null)
+    try {
+      const rawStats = await fetchStats({ gameweek: g, season: null })
+      const allRanked = rawStats.ranked?.ALL
+      if (!Array.isArray(allRanked) || allRanked.length === 0) {
+        throw new Error(
+          rawStats.detail || `No model rows for GW${g}. Pick GW1–GW${max ?? '?'}.`,
+        )
+      }
+      const squadIds = ui.isLiveData ? ui.squadIds : null
+      let adapted = adaptToStatsOutput(rawStats, squadIds)
+
+      if (ui.isLiveData && ui.squadIds?.length === 15) {
+        try {
+          const [rawTransfers, rawManager] = await Promise.all([
+            fetchTransfers({
+              playerIds: ui.squadIds,
+              bank: ui.bank ?? 0,
+              freeTransfers: ui.freeTransfers ?? 1,
+              gameweek: g,
+            }),
+            fetchManager({
+              playerIds: ui.squadIds,
+              bank: ui.bank ?? 0,
+              gameweek: g,
+              tripleCaptain: ui.chips?.tripleCaptain ?? true,
+              benchBoost: ui.chips?.benchBoost ?? true,
+            }),
+          ])
+          adapted.transferRecommendation = adaptToTransferOutput(rawTransfers)
+          adapted.managerRecommendation = adaptToManagerOutput(rawManager)
+          if (adapted.transferRecommendation?.planningGameweek != null) {
+            adapted.planningGameweek = adapted.transferRecommendation.planningGameweek
+          }
+        } catch (_e) {
+          /* keep stats-only */
+        }
+      }
+
+      if (adapted.datasetMaxGw != null) {
+        setGwDatasetCap(adapted.datasetMaxGw)
+      }
+      setAgentData(adapted)
+    } catch (err) {
+      const msg = err.message ?? String(err)
+      const inferred = parseDatasetGwMaxFromStatsError(msg)
+      if (inferred != null) {
+        setGwDatasetCap((prev) => (prev == null ? inferred : Math.min(prev, inferred)))
+      }
+      setAgentError(msg)
+    } finally {
+      setStatsGwLoading(false)
+    }
+  }, [agentData?.datasetMaxGw, gwDatasetCap])
 
   const isResultScreen = [SCREENS.STATS, SCREENS.MANAGER, SCREENS.DASHBOARD].includes(screen)
 
@@ -139,9 +222,9 @@ export default function App() {
 
           {/* GW badge */}
           <div className="flex items-center gap-2">
-            {userInput && (
+            {agentData?.gameweek != null && (
               <span className="text-[10px] font-bold text-primary/70 bg-primary/10 px-2 py-1 rounded-lg border border-primary/20">
-                GW{userInput.gameweek}
+                GW{agentData.gameweek}
               </span>
             )}
             {screen !== SCREENS.INPUT && screen !== SCREENS.LOADING && (
@@ -203,7 +286,16 @@ export default function App() {
       <main className="flex-1 max-w-lg mx-auto w-full px-4 pt-4">
         {screen === SCREENS.INPUT    && <InputScreen    onRun={handleRun} />}
         {screen === SCREENS.LOADING  && <LoadingScreen  onComplete={handleLoadingComplete} />}
-        {screen === SCREENS.STATS    && <StatsScreen agentData={agentData} agentError={agentError} userInput={userInput} />}
+        {screen === SCREENS.STATS    && (
+          <StatsScreen
+            agentData={agentData}
+            agentError={agentError}
+            userInput={userInput}
+            statsGwLoading={statsGwLoading}
+            onGameweekChange={handleStatsGameweekChange}
+            selectableGwMax={gwDatasetCap ?? agentData?.datasetMaxGw ?? null}
+          />
+        )}
         {screen === SCREENS.MANAGER  && <ManagerScreen agentData={agentData} userInput={userInput} />}
         {screen === SCREENS.DASHBOARD&& <Dashboard agentData={agentData} userInput={userInput} onReset={handleReset} />}
       </main>

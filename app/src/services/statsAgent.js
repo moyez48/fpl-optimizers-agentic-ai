@@ -14,6 +14,50 @@
  * @param {string}      opts.season    - e.g. "2024-25"
  * @returns {Promise<Object>}          - Raw agent response
  */
+/**
+ * FastAPI may return `detail` as a string, validation array, or object.
+ */
+export function extractStatsApiDetail(body) {
+  if (!body || typeof body !== 'object') return null
+  const d = body.detail
+  if (typeof d === 'string') return d
+  if (Array.isArray(d)) {
+    return d.map((x) => (x && typeof x === 'object' ? x.msg ?? JSON.stringify(x) : String(x))).join('; ')
+  }
+  if (d && typeof d === 'object') {
+    return d.message ?? d.msg ?? JSON.stringify(d)
+  }
+  return body.message ?? body.error ?? null
+}
+
+/**
+ * When the model has no rows for GW33 but the CSV ends at GW31, the backend
+ * returns a long `run_model: no feature rows...` string — normalize for UI.
+ */
+export function friendlyStatsLoadError(raw) {
+  const s = String(raw ?? '')
+  const range = s.match(/GW1\s*[–-]\s*GW(\d+)/i)
+  const noRows = s.match(/no feature rows for\s+[^\s]+\s+GW(\d+)/i)
+  if (range && noRows) {
+    const hi = range[1]
+    const asked = noRows[1]
+    return `Gameweek ${asked} is not in your processed dataset yet (your CSV runs through GW${hi}). Update the data pipeline or choose GW1–GW${hi}.`
+  }
+  return s.replace(/^run_model:\s*/i, '').trim() || s
+}
+
+/** After a failed load, use this so the GW dropdown can disable future weeks. Works on raw API text and friendlyStatsLoadError output. */
+export function parseDatasetGwMaxFromStatsError(message) {
+  if (!message) return null
+  const s = String(message)
+  const patterns = [/GW1\s*[–-]\s*GW(\d+)/i, /through GW(\d+)/i, /choose GW1\s*[–-]\s*GW(\d+)/i]
+  for (const re of patterns) {
+    const m = s.match(re)
+    if (m) return parseInt(m[1], 10)
+  }
+  return null
+}
+
 export async function fetchStats({ gameweek = null, season = null } = {}) {
   const res = await fetch('/api/stats', {
     method: 'POST',
@@ -22,23 +66,25 @@ export async function fetchStats({ gameweek = null, season = null } = {}) {
   })
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
-    const detail = body.detail
-    const msg = typeof detail === 'string'
-      ? detail
-      : Array.isArray(detail)
-        ? detail.map(d => d.msg || JSON.stringify(d)).join('; ')
-        : body.error
-    throw new Error(msg || `Stats API returned ${res.status}`)
+    const raw = extractStatsApiDetail(body) ?? `Stats API returned ${res.status}`
+    throw new Error(friendlyStatsLoadError(raw))
   }
   return res.json()
 }
+
+/** Align with backend single-GW bounds; drop season totals if they slip through. */
+const ACTUAL_PTS_SANITY_MIN = -25
+const ACTUAL_PTS_SANITY_MAX = 30
 
 /** Prefer backend `actual_points`, then legacy `total_points`. */
 function pickActualPoints(p) {
   const raw = p.actual_points ?? p.total_points
   if (raw === null || raw === undefined) return null
   const n = Number(raw)
-  return Number.isFinite(n) ? Math.round(n) : null
+  if (!Number.isFinite(n)) return null
+  const r = Math.round(n)
+  if (r < ACTUAL_PTS_SANITY_MIN || r > ACTUAL_PTS_SANITY_MAX) return null
+  return r
 }
 
 /** Stable £m / xPts numbers for UI (avoids NaN breaking .toFixed). */
@@ -231,7 +277,7 @@ export function adaptToStatsOutput(apiResponse, squadIds = null) {
 
   // Build injury lookup FIRST so mapPlayer can use it
   const STATUS_LABEL = { d: 'Doubtful', i: 'Injured', s: 'Suspended', u: 'Unavailable' }
-  const injuryAlerts = (apiResponse.injury_alerts || []).map(p => ({
+  let injuryAlerts = (apiResponse.injury_alerts || []).map(p => ({
     id:          p.element,
     name:        p.name,
     team:        p.team,
@@ -242,6 +288,12 @@ export function adaptToStatsOutput(apiResponse, squadIds = null) {
     news:        p.news,
     startProb:   p.chance_of_playing_next_round != null ? p.chance_of_playing_next_round / 100 : null,
   }))
+  if (squadIds?.length) {
+    const squadSet = new Set(squadIds)
+    injuryAlerts = injuryAlerts.filter((a) => squadSet.has(a.id))
+  } else {
+    injuryAlerts = []
+  }
   const injuredElementIds = new Set(injuryAlerts.map(p => p.id))
 
   function mapPlayer(p, form) {
@@ -336,7 +388,10 @@ export function adaptToStatsOutput(apiResponse, squadIds = null) {
     squadXPts,
     globalTop11XPts,
     captainShortlist,
-    gameweek:         apiResponse.gameweek,
+    gameweek:             apiResponse.gameweek,
     gwHasActualScores,
+    datasetMinGw:         apiResponse.dataset_gw_min ?? null,
+    datasetMaxGw:         apiResponse.dataset_gw_max ?? null,
+    actualScoresSource:   apiResponse.actual_scores_source ?? null,
   }
 }

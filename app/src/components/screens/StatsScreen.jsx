@@ -132,7 +132,22 @@ function PositionSection({ position, players, limit, gwHasResults, sortBy }) {
   )
 }
 
-export default function StatsScreen({ agentData = null, agentError = null, userInput = null }) {
+const ACTUAL_SOURCE_LABEL = {
+  fpl_event_live: 'Official FPL API (this gameweek)',
+  csv_sanitised: 'Dataset CSV',
+  fpl_event_live_csv_gapfill: 'FPL API + CSV where needed',
+  none: 'Not available',
+}
+
+export default function StatsScreen({
+  agentData = null,
+  agentError = null,
+  userInput = null,
+  statsGwLoading = false,
+  onGameweekChange,
+  /** Max GW present in the model CSV; future GWs disabled. From API and/or inferred after a failed request. */
+  selectableGwMax = null,
+}) {
   const [sortBy, setSortBy] = useState('xPts')
 
   // Show error state if agent failed and no data
@@ -157,7 +172,7 @@ export default function StatsScreen({ agentData = null, agentError = null, userI
 
   if (!agentData) return null
 
-  const { rankedPlayers, injuryAlerts, globalTop11XPts, squadXPts } = agentData
+  const { rankedPlayers, globalTop11XPts, squadXPts } = agentData
 
   if (!rankedPlayers?.length) {
     return (
@@ -202,9 +217,11 @@ export default function StatsScreen({ agentData = null, agentError = null, userI
       : POSITIONS.map(pos => ({ pos, players: byPosition[pos] || [] }))
 
   const gwHasActualScores = agentData.gwHasActualScores === true
-
-  const squadIds = new Set(userInput?.isLiveData ? (userInput?.squadIds ?? []) : [])
-  const squadInjuries = injuryAlerts.filter(p => squadIds.has(p.id))
+  const dsMin = agentData.datasetMinGw
+  const dsMax = selectableGwMax ?? agentData.datasetMaxGw
+  const actualSrcKey = agentData.actualScoresSource
+  const actualSrcLabel =
+    actualSrcKey && ACTUAL_SOURCE_LABEL[actualSrcKey] ? ACTUAL_SOURCE_LABEL[actualSrcKey] : null
 
   return (
     <div className="flex flex-col gap-4 pb-6">
@@ -221,20 +238,58 @@ export default function StatsScreen({ agentData = null, agentError = null, userI
         </p>
       </div>
 
-      {/* Summary pills */}
-      <div className="grid grid-cols-2 gap-2">
-        <div className="bg-card rounded-xl p-3 border border-white/5">
-          <p className="text-[10px] text-fpl_text/40 uppercase tracking-widest">Squad xPts</p>
-          <p className="text-2xl font-black text-fpl_text">{squadTotalXPts}</p>
-          <p className="text-[10px] text-fpl_text/40">top 11 by predicted pts</p>
+      {agentError && agentData && (
+        <div className="bg-danger/10 border border-danger/25 rounded-xl px-3 py-2">
+          <p className="text-[11px] text-danger font-semibold">{agentError}</p>
+          <p className="text-[10px] text-fpl_text/45 mt-1">Showing the last loaded gameweek above.</p>
         </div>
-        <div className="bg-danger/10 border border-danger/20 rounded-xl p-3">
-          <p className="text-[10px] text-danger/70 uppercase tracking-widest">Injury Alerts</p>
-          <p className="text-2xl font-black text-danger">{injuryAlerts?.length ?? 0}</p>
-          <p className="text-[10px] text-danger/60">
-            {injuryAlerts?.length ? (squadInjuries.length ? `${squadInjuries.length} in your squad` : 'See alerts below') : 'All clear'}
+      )}
+
+      {/* Gameweek selector — predictions only exist for GWs present in the processed dataset */}
+      <div className="bg-card rounded-xl p-3 border border-white/5 flex flex-col gap-2">
+        <label htmlFor="stats-gw-select" className="text-[10px] text-fpl_text/40 uppercase tracking-widest">
+          View gameweek
+        </label>
+        <div className="flex items-center gap-2 flex-wrap">
+          <select
+            id="stats-gw-select"
+            value={agentData.gameweek ?? 1}
+            disabled={statsGwLoading || typeof onGameweekChange !== 'function'}
+            onChange={(e) => onGameweekChange?.(Number(e.target.value))}
+            className="flex-1 min-w-[8rem] bg-background border border-white/10 rounded-lg px-3 py-2 text-sm font-semibold text-fpl_text
+              disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-1 focus:ring-primary/40"
+          >
+            {Array.from({ length: 38 }, (_, i) => i + 1).map((gw) => {
+              const noData = dsMax != null && gw > dsMax
+              return (
+                <option key={gw} value={gw} disabled={noData}>
+                  GW{gw}
+                  {noData ? ' — N/A (add this GW to your dataset first)' : ''}
+                </option>
+              )
+            })}
+          </select>
+          {statsGwLoading && (
+            <span className="text-[10px] font-semibold text-primary animate-pulse">Loading…</span>
+          )}
+        </div>
+        {dsMin != null && dsMax != null && (
+          <p className="text-[10px] text-fpl_text/40">
+            Model features cover GW{dsMin}–GW{dsMax} in your CSV. Later gameweeks stay disabled until that week is processed.
           </p>
-        </div>
+        )}
+        {actualSrcLabel && (
+          <p className="text-[10px] text-fpl_text/35">
+            Actual points column: <span className="text-fpl_text/55">{actualSrcLabel}</span>
+          </p>
+        )}
+      </div>
+
+      {/* Summary — squad xPts (injury / availability for your squad is on the Manager tab) */}
+      <div className="bg-card rounded-xl p-3 border border-white/5">
+        <p className="text-[10px] text-fpl_text/40 uppercase tracking-widest">Squad xPts</p>
+        <p className="text-2xl font-black text-fpl_text">{squadTotalXPts}</p>
+        <p className="text-[10px] text-fpl_text/40">top 11 by predicted pts</p>
       </div>
 
       {!gwHasActualScores && (
@@ -274,38 +329,6 @@ export default function StatsScreen({ agentData = null, agentError = null, userI
           sortBy={sortBy}
         />
       ))}
-
-      {/* Injury alert banner */}
-      {injuryAlerts?.length > 0 && (
-        <div className="bg-amber/10 border border-amber/20 rounded-xl p-4">
-          <p className="text-amber font-bold text-xs mb-2">⚠️ FPL Injury & Availability Alerts</p>
-          <div className="flex flex-col gap-1.5">
-            {injuryAlerts.map(p => (
-              <div key={p.id} className="flex items-start gap-2">
-                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded shrink-0 mt-0.5
-                  ${p.statusCode === 'i' ? 'bg-danger/30 text-danger' :
-                    p.statusCode === 's' ? 'bg-danger/30 text-danger' :
-                    'bg-amber/30 text-amber'}`}>
-                  {p.statusLabel}
-                </span>
-                <div className="min-w-0">
-                  <p className="text-xs text-amber/90 font-semibold flex items-center flex-wrap gap-1">
-                    {p.name}
-                    <span className="text-amber/50 font-normal"> · {p.position} · {p.team}</span>
-                    {p.startProb != null && (
-                      <span className="text-amber/50 font-normal"> · {(p.startProb * 100).toFixed(0)}% chance</span>
-                    )}
-                    {squadIds.has(p.id) && (
-                      <span className="text-[9px] font-bold bg-danger/30 text-danger px-1.5 py-0.5 rounded ml-1">YOUR SQUAD</span>
-                    )}
-                  </p>
-                  {p.news && <p className="text-[10px] text-amber/50 truncate">{p.news}</p>}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   )
 }
