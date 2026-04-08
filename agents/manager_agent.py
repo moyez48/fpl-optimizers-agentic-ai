@@ -752,4 +752,3 @@ if __name__ == "__main__":
             print("\nChip recommendation: None")
 
         print(f"\nSummary: {result['summary']}")
-1

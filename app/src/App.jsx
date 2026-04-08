@@ -1,9 +1,10 @@
-import React, { useState } from 'react'
+import React, { useState, useRef } from 'react'
 import InputScreen   from './components/screens/InputScreen'
 import LoadingScreen  from './components/screens/LoadingScreen'
 import StatsScreen    from './components/screens/StatsScreen'
 import ManagerScreen  from './components/screens/ManagerScreen'
 import Dashboard      from './components/screens/Dashboard'
+import { fetchStats, adaptToStatsOutput, fetchTransfers, adaptToTransferOutput, fetchManager, adaptToManagerOutput } from './services/statsAgent'
 
 // App screens in order
 const SCREENS = {
@@ -23,19 +24,102 @@ const RESULT_TABS = [
 export default function App() {
   const [screen, setScreen] = useState(SCREENS.INPUT)
   const [userInput, setUserInput] = useState(null)
+  const [agentData, setAgentData] = useState(null)
+  const [agentError, setAgentError] = useState(null)
+
+  // Holds the in-flight API promises so LoadingScreen can await them
+  const statsPromiseRef     = useRef(null)
+  const transfersPromiseRef = useRef(null)
+  const managerPromiseRef   = useRef(null)
+  const userInputRef        = useRef(null)
 
   const handleRun = (input) => {
     setUserInput(input)
+    userInputRef.current = input
+    setAgentData(null)
+    setAgentError(null)
+
+    // Kick off stats call immediately — runs in parallel with the loading animation
+    statsPromiseRef.current = fetchStats({ gameweek: input.gameweek ?? null })
+
+    // Kick off Sporting Director call only when the user has a real FPL squad
+    // (demo/fake player IDs won't match FPL element IDs in the dataset)
+    if (input.isLiveData && input.squadIds?.length === 15) {
+      transfersPromiseRef.current = fetchTransfers({
+        playerIds:     input.squadIds,
+        bank:          input.bank ?? 0,
+        freeTransfers: input.freeTransfers ?? 1,
+        gameweek:      input.gameweek ?? null,
+      })
+      managerPromiseRef.current = fetchManager({
+        playerIds:     input.squadIds,
+        bank:          input.bank ?? 0,
+        gameweek:      input.gameweek ?? null,
+        tripleCaptain: input.chips?.tripleCaptain ?? true,
+        benchBoost:    input.chips?.benchBoost ?? true,
+      })
+    } else {
+      transfersPromiseRef.current = null
+      managerPromiseRef.current = null
+    }
+
     setScreen(SCREENS.LOADING)
   }
 
-  const handleLoadingComplete = () => {
+  // Called by LoadingScreen when its animation finishes.
+  // Awaits both API promises so the screen only advances once all data is ready.
+  const handleLoadingComplete = async () => {
+    try {
+      const rawStats = await statsPromiseRef.current
+      if (!rawStats || typeof rawStats !== 'object') {
+        throw new Error(
+          'No stats response from /api/stats. Start the API and check app/vite.config.js proxy (VITE_API_PROXY → your port).'
+        )
+      }
+      const allRanked = rawStats.ranked?.ALL
+      if (!Array.isArray(allRanked) || allRanked.length === 0) {
+        throw new Error(
+          'Stats API returned no players (ranked.ALL is empty). Restart uvicorn so the cache resets (schema bump) and try again.'
+        )
+      }
+      const squadIds = userInputRef.current?.isLiveData ? userInputRef.current?.squadIds : null
+      const adapted = adaptToStatsOutput(rawStats, squadIds)
+
+      // Transfers are optional — don't fail the whole pipeline if they error
+      if (transfersPromiseRef.current) {
+        try {
+          const rawTransfers = await transfersPromiseRef.current
+          adapted.transferRecommendation = adaptToTransferOutput(rawTransfers)
+        } catch (_transferErr) {
+          // Transfers failed but stats succeeded — continue without them
+        }
+      }
+
+      if (managerPromiseRef.current) {
+        try {
+          const rawManager = await managerPromiseRef.current
+          adapted.managerRecommendation = adaptToManagerOutput(rawManager)
+        } catch (_mgrErr) {
+          // Manager agent optional if it errors independently
+        }
+      }
+
+      if (adapted.transferRecommendation?.planningGameweek != null) {
+        adapted.planningGameweek = adapted.transferRecommendation.planningGameweek
+      }
+
+      setAgentData(adapted)
+    } catch (err) {
+      setAgentError(err.message ?? String(err))
+    }
     setScreen(SCREENS.STATS)
   }
 
   const handleReset = () => {
     setScreen(SCREENS.INPUT)
     setUserInput(null)
+    setAgentData(null)
+    setAgentError(null)
   }
 
   const isResultScreen = [SCREENS.STATS, SCREENS.MANAGER, SCREENS.DASHBOARD].includes(screen)
@@ -119,9 +203,9 @@ export default function App() {
       <main className="flex-1 max-w-lg mx-auto w-full px-4 pt-4">
         {screen === SCREENS.INPUT    && <InputScreen    onRun={handleRun} />}
         {screen === SCREENS.LOADING  && <LoadingScreen  onComplete={handleLoadingComplete} />}
-        {screen === SCREENS.STATS    && <StatsScreen />}
-        {screen === SCREENS.MANAGER  && <ManagerScreen />}
-        {screen === SCREENS.DASHBOARD&& <Dashboard onReset={handleReset} />}
+        {screen === SCREENS.STATS    && <StatsScreen agentData={agentData} agentError={agentError} userInput={userInput} />}
+        {screen === SCREENS.MANAGER  && <ManagerScreen agentData={agentData} userInput={userInput} />}
+        {screen === SCREENS.DASHBOARD&& <Dashboard agentData={agentData} userInput={userInput} onReset={handleReset} />}
       </main>
     </div>
   )

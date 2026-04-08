@@ -55,3 +55,52 @@ export function squadErrors(players) {
 export function totalPrice(players) {
   return players.reduce((sum, p) => sum + p.price, 0)
 }
+
+/**
+ * Select the optimal starting XI from a 15-player squad using a greedy xPts approach.
+ * Enforces FPL formation rules: 1 GKP, min 3 DEF / 2 MID / 1 FWD, max 5 DEF / 5 MID / 3 FWD.
+ *
+ * @param {Array} squadPlayers  — array of player objects with .position and .adjustedXPts
+ * @returns {{ xi, bench, captain, viceCaptain, formation }}
+ */
+export function selectOptimalXI(squadPlayers) {
+  const normalize = pos => (pos === 'GKP' ? 'GK' : pos)
+
+  const sorted = [...squadPlayers].sort((a, b) => b.adjustedXPts - a.adjustedXPts)
+  const gkps   = sorted.filter(p => normalize(p.position) === 'GK')
+  const defs   = sorted.filter(p => p.position === 'DEF')
+  const mids   = sorted.filter(p => p.position === 'MID')
+  const fwds   = sorted.filter(p => p.position === 'FWD')
+
+  // Mandatory minimums
+  const starters = new Set()
+  const addN = (players, n) => players.slice(0, n).forEach(p => starters.add(p.id))
+  addN(gkps, 1)
+  addN(defs, 3)
+  addN(mids, 2)
+  addN(fwds, 1)
+
+  // Fill 4 flex outfield spots from remaining (sorted by xPts), respecting maxes
+  const counts = { GK: 1, DEF: 3, MID: 2, FWD: 1 }
+  const maxes  = { GK: 1, DEF: 5, MID: 5, FWD: 3 }
+
+  const remaining = sorted.filter(p => !starters.has(p.id) && normalize(p.position) !== 'GK')
+  for (const p of remaining) {
+    if (starters.size >= 11) break
+    const pos = p.position
+    if ((counts[pos] ?? 0) < (maxes[pos] ?? 0)) {
+      starters.add(p.id)
+      counts[pos] = (counts[pos] ?? 0) + 1
+    }
+  }
+
+  const xi    = squadPlayers.filter(p => starters.has(p.id))
+  const bench = squadPlayers.filter(p => !starters.has(p.id))
+
+  const outfield = xi.filter(p => normalize(p.position) !== 'GK').sort((a, b) => b.adjustedXPts - a.adjustedXPts)
+  const captain     = outfield[0] ?? null
+  const viceCaptain = outfield[1] ?? null
+  const formation = `${counts.DEF}-${counts.MID}-${counts.FWD}`
+
+  return { xi, bench, captain, viceCaptain, formation }
+}

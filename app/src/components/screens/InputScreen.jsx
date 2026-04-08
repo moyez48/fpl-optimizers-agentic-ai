@@ -1,7 +1,7 @@
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useEffect } from 'react'
 import { PLAYERS, DEMO_SQUAD_IDS } from '../../data/players'
 import { isSquadValid, squadErrors, totalPrice, countByPosition } from '../../utils/formations'
-import { importFPLTeam } from '../../services/fplApi'
+import { importFPLTeam, fetchBootstrap, getCurrentEvent } from '../../services/fplApi'
 import PlayerCard from '../ui/PlayerCard'
 
 const POSITIONS = ['GKP', 'DEF', 'MID', 'FWD']
@@ -14,7 +14,7 @@ export default function InputScreen({ onRun }) {
   // ── Squad / config state ────────────────────────────────────────────────────
   const [playerPool, setPlayerPool] = useState(PLAYERS)  // can be swapped for real FPL data
   const [squadIds, setSquadIds]       = useState([])
-  const [gameweek, setGameweek]       = useState(25)
+  const [gameweek, setGameweek]       = useState(30)
   const [bank, setBank]               = useState(2.3)
   const [freeTransfers, setFreeTransfers] = useState(1)
   const [chips, setChips]             = useState({ tripleCaptain: true, benchBoost: true, wildcard: false, freeHit: false })
@@ -22,6 +22,16 @@ export default function InputScreen({ onRun }) {
   const [searchQuery, setSearchQuery] = useState('')
   const [filterPos, setFilterPos]     = useState('ALL')
   const [showPicker, setShowPicker]   = useState(false)
+
+  // ── Auto-detect current gameweek on mount ────────────────────────────────────
+  useEffect(() => {
+    fetchBootstrap()
+      .then(bootstrap => {
+        const event = getCurrentEvent(bootstrap.events)
+        if (event?.id) setGameweek(event.id)
+      })
+      .catch(() => {}) // silently keep default if FPL API is unreachable
+  }, [])
 
   // ── FPL import state ────────────────────────────────────────────────────────
   const [teamIdInput, setTeamIdInput] = useState('')

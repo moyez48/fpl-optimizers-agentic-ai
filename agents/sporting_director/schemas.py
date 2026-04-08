@@ -13,8 +13,22 @@ Costs are always in £m (e.g. 6.0 = £6.0m), never the raw FPL 0.1m units.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, List, Optional
+
+
+def safe_int(value: Any, default: Any = 0) -> Any:
+    """Coerce to int; NaN / missing / invalid → default (pandas merges often leave NaN)."""
+    if value is None:
+        return default
+    try:
+        x = float(value)
+        if not math.isfinite(x):
+            return default
+        return int(x)
+    except (TypeError, ValueError):
+        return default
 
 
 # ── Position constants ────────────────────────────────────────────────────────
@@ -95,15 +109,15 @@ class PlayerProfile:
             name          = record["name"],
             position      = record["position"],
             team          = record["team"],
-            element       = int(record.get("element", 0)),
+            element       = safe_int(record.get("element"), 0),
             cost          = float(record.get("value_m", record.get("value", 0) / 10)),
             predicted_pts = float(record.get("predicted_pts", 0.0)),
             expected_pts  = float(record.get("expected_pts", 0.0)),
             start_prob    = float(record.get("start_prob", 0.7)),
             avg_pts_last5 = float(record.get("avg_pts_last5", 0.0)),
             form_trend    = float(record.get("form_trend", 0.0)),
-            goals_last5   = int(record.get("goals_last5", 0)),
-            assists_last5 = int(record.get("assists_last5", 0)),
+            goals_last5   = safe_int(record.get("goals_last5"), 0),
+            assists_last5 = safe_int(record.get("assists_last5"), 0),
             is_available  = record.get("is_available", True),
         )
 

@@ -5,52 +5,55 @@ const AGENTS = [
   {
     key: 'statistician',
     name: 'Statistician Agent',
-    description: 'Calculates xPts, xG, xA · flags injuries · ranks squad',
+    description: 'Fetches FPL data · engineers features · runs XGBoost predictions',
     thoughts: [
-      'Fetching fixture difficulty ratings...',
-      'Computing adjustedXPts with form weighting...',
-      'Flagging Rice (Arsenal) as doubtful — applying 10% penalty...',
-      'Ranking 15 players by adjusted projected points...',
-      'Generating injury alerts and risk metrics...',
+      'Fetching FPL bootstrap and fixture data...',
+      'Engineering 180+ player features per gameweek...',
+      'Running XGBoost model across all players...',
+      'Computing start probabilities and risk adjustments...',
+      'Ranking all players by expected points...',
     ],
     duration: 2200,
   },
   {
     key: 'manager',
     name: 'Manager Agent',
-    description: 'Selects optimal XI · assigns captain · evaluates chips',
+    description: 'Analyses captain options · identifies form leaders',
     thoughts: [
-      'Enforcing formation rules: 1 GKP, min 3 DEF, min 2 MID, min 1 FWD...',
-      'Checking 3-per-club constraint across all 15 players...',
-      'Captain: Haaland (xPts 14.2, FDR 2) — strongest option...',
-      'Triple Captain trigger: xPts > 12 AND FDR ≤ 2 → ACTIVATED...',
-      'Ordering bench by coverage value...',
+      'Analysing top player predictions by expected points...',
+      'Computing captain shortlist...',
+      'Filtering by start probability and fixture difficulty...',
+      'Identifying form leaders and in-form differentials...',
+      'Building gameweek summary...',
     ],
     duration: 2000,
   },
   {
-    key: 'transfer',
-    name: 'Transfer Agent',
-    description: 'Ranks transfers by ROI · calculates hit penalties',
+    key: 'sporting_director',
+    name: 'Sporting Director Agent',
+    description: 'Evaluates transfer options · scores sell/buy pairs',
     thoughts: [
-      'Identifying weakest squad players by adjustedXPts...',
-      'Rice (4.6 xPts, injured) flagged as priority transfer out...',
-      'Searching affordable MID replacements within £8.9m budget...',
-      'Mbeumo: +5.5 net xPts gain, free transfer — HIGH priority...',
-      'Evaluating Mykolenko hit: net -0.1 pts → NOT recommended...',
+      'Loading full player pool from predictions...',
+      'Fetching upcoming fixture schedules...',
+      'Enumerating valid transfer pairs...',
+      'Scoring transfers by expected net gain...',
+      'Detecting wildcard and hold conditions...',
     ],
     duration: 1800,
   },
 ]
 
 export default function LoadingScreen({ onComplete }) {
-  const [agentIndex, setAgentIndex] = useState(0)
-  const [progress, setProgress] = useState(0)
-  const [thoughtIndex, setThoughtIndex] = useState(0)
+  const [agentIndex, setAgentIndex]         = useState(0)
+  const [progress, setProgress]             = useState(0)
+  const [thoughtIndex, setThoughtIndex]     = useState(0)
   const [completedAgents, setCompletedAgents] = useState(new Set())
+  const [waitingForApi, setWaitingForApi]   = useState(false)
 
   useEffect(() => {
     if (agentIndex >= AGENTS.length) {
+      setWaitingForApi(true)
+      // Still need to await the real API — onComplete handles that
       setTimeout(onComplete, 400)
       return
     }
@@ -90,21 +93,20 @@ export default function LoadingScreen({ onComplete }) {
   }
 
   const currentAgent = AGENTS[agentIndex]
+  const allDone = completedAgents.size === AGENTS.length
 
   return (
     <div className="flex flex-col gap-4 pb-6">
       <div>
         <p className="text-xs text-fpl_text/40 uppercase tracking-widest">Processing</p>
-        <p className="text-lg font-black text-fpl_text">Analysing your squad...</p>
+        <p className="text-lg font-black text-fpl_text">Running agent pipeline...</p>
       </div>
 
       {/* Overall progress */}
       <div className="bg-card rounded-xl p-4 border border-white/5">
         <div className="flex justify-between items-center mb-2">
           <p className="text-xs text-fpl_text/50">Agent pipeline</p>
-          <p className="text-xs text-primary font-bold">
-            {completedAgents.size}/{AGENTS.length} complete
-          </p>
+          <p className="text-xs text-primary font-bold">{completedAgents.size}/{AGENTS.length} complete</p>
         </div>
         <div className="h-2 bg-white/5 rounded-full overflow-hidden">
           <div
@@ -128,19 +130,24 @@ export default function LoadingScreen({ onComplete }) {
         ))}
       </div>
 
-      {/* Live insight */}
-      {currentAgent && agentIndex < AGENTS.length && (
+      {/* Live insight while animating */}
+      {currentAgent && !allDone && (
         <div className="bg-secondary/5 border border-secondary/15 rounded-xl p-4">
           <p className="text-[10px] text-secondary/60 uppercase tracking-widest mb-1">Live insight</p>
-          <p className="text-sm text-fpl_text/70 italic">
-            💡 {currentAgent.thoughts[thoughtIndex]}
-          </p>
+          <p className="text-sm text-fpl_text/70 italic">💡 {currentAgent.thoughts[thoughtIndex]}</p>
         </div>
       )}
 
-      {completedAgents.size === AGENTS.length && (
-        <div className="bg-primary/10 border border-primary/30 rounded-xl p-4 text-center">
-          <p className="text-primary font-bold text-sm">All agents complete — loading results...</p>
+      {/* Waiting for real API response */}
+      {allDone && (
+        <div className="bg-primary/10 border border-primary/30 rounded-xl p-4">
+          <div className="flex items-center gap-3">
+            <div className="w-4 h-4 border-2 border-primary/30 border-t-primary rounded-full animate-spin shrink-0" />
+            <div>
+              <p className="text-primary font-bold text-sm">Awaiting agent response...</p>
+              <p className="text-[10px] text-primary/50 mt-0.5">XGBoost pipeline running — this takes ~60s on first load, then results are cached.</p>
+            </div>
+          </div>
         </div>
       )}
     </div>

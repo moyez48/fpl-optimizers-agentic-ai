@@ -1,25 +1,224 @@
-import React, { useState } from 'react'
-import { DEMO_STATS_OUTPUT } from '../../data/demoOutput'
+import React, { useState, useMemo } from 'react'
 
-const FDR_BADGE = (fdr) => {
-  if (fdr <= 2) return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-primary text-background">FDR {fdr}</span>
-  if (fdr === 3) return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber text-background">FDR {fdr}</span>
-  return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-danger text-white">FDR {fdr}</span>
+const XPTS_COLOR = (v) => v >= 6 ? 'text-primary' : v >= 3 ? 'text-amber' : 'text-danger'
+
+const DIFF_COLOR = (d) => {
+  if (d == null) return 'text-fpl_text/30'
+  if (Math.abs(d) <= 1) return 'text-primary'
+  if (Math.abs(d) <= 3) return 'text-amber'
+  return 'text-danger'
 }
 
-const XPTS_COLOR = (v) => v >= 10 ? 'text-primary' : v >= 6 ? 'text-amber' : 'text-danger'
+const POS_STYLE = {
+  GK:  'bg-amber/20 text-amber',
+  DEF: 'bg-blue-500/20 text-blue-300',
+  MID: 'bg-primary/20 text-primary',
+  FWD: 'bg-danger/20 text-danger',
+  ALL: 'bg-white/10 text-fpl_text',
+}
 
-const TABS = ['Top 11 xPts', 'Full Stats', 'Risk Matrix']
+const POSITION_LIMITS = { GK: 2, DEF: 4, MID: 4, FWD: 3, ALL: 50 }
+const POSITIONS = ['FWD', 'MID', 'DEF', 'GK']
 
-export default function StatsScreen() {
-  const [tab, setTab] = useState(0)
-  const { rankedPlayers, injuryAlerts, squadTotalXPts } = DEMO_STATS_OUTPUT
+const COLS = '1.2rem 1fr 3.2rem 3.2rem 2.5rem'
+
+function PlayerRow({ player, idx, gwHasResults, sortBy }) {
+  const showActual = gwHasResults && player.actualPts != null
+  const diff = showActual
+    ? (player.actualPts - player.adjustedXPts).toFixed(1)
+    : null
+
+  return (
+    <div
+      className={`grid gap-1.5 px-4 py-2.5 border-b border-white/5 last:border-0
+        ${player.injured ? 'bg-amber/5' : idx % 2 === 0 ? 'bg-transparent' : 'bg-white/[0.02]'}`}
+      style={{ gridTemplateColumns: COLS }}
+    >
+      <span className="text-[10px] text-fpl_text/30 self-center">{idx + 1}</span>
+
+      <div className="min-w-0 self-center">
+        <div className="flex items-center gap-1.5">
+          <span className={`text-[9px] font-bold px-1 py-0.5 rounded shrink-0 ${POS_STYLE[player.position] || 'bg-white/10 text-fpl_text/60'}`}>
+            {player.position}
+          </span>
+          <p className="text-xs font-semibold text-fpl_text truncate">{player.name}</p>
+          {player.injured && <span className="text-[9px]">⚠️</span>}
+        </div>
+        <p className="text-[10px] text-fpl_text/40 ml-6">{player.team} · £{player.price}m</p>
+      </div>
+
+      {/* xPts */}
+      <span className={`text-sm font-black self-center text-right ${sortBy === 'xPts' ? XPTS_COLOR(Number(player.adjustedXPts) || 0) : 'text-fpl_text/50'}`}>
+        {Number.isFinite(Number(player.adjustedXPts)) ? Number(player.adjustedXPts).toFixed(1) : '—'}
+      </span>
+
+      {/* Actual — real integers once GW is scored; "—" only before data exists */}
+      <span className={`text-sm self-center text-right ${showActual ? (sortBy === 'actual' ? 'font-black text-fpl_text' : 'font-bold text-fpl_text/80') : 'text-fpl_text/20'}`}>
+        {gwHasResults ? (player.actualPts != null ? player.actualPts : '—') : '—'}
+      </span>
+
+      {/* +/- diff */}
+      <span className={`text-[10px] font-semibold self-center text-right ${DIFF_COLOR(diff != null ? parseFloat(diff) : null)}`}>
+        {diff != null ? (parseFloat(diff) >= 0 ? `+${diff}` : diff) : ''}
+      </span>
+    </div>
+  )
+}
+
+function PositionSection({ position, players, limit, gwHasResults, sortBy }) {
+  const [expanded, setExpanded] = useState(false)
+
+  const sorted = useMemo(() => {
+    if (sortBy === 'actual' && gwHasResults) {
+      return [...players].sort((a, b) => {
+        const av = a.actualPts
+        const bv = b.actualPts
+        if (av == null && bv == null) return 0
+        if (av == null) return 1
+        if (bv == null) return -1
+        return bv - av
+      })
+    }
+    return players
+  }, [players, sortBy, gwHasResults])
+
+  const visible = expanded ? sorted : sorted.slice(0, limit)
+  const hasMore = sorted.length > limit
+
+  return (
+    <div className="bg-card rounded-xl border border-white/5 overflow-hidden">
+      <button
+        onClick={() => hasMore && setExpanded(!expanded)}
+        className="w-full flex items-center justify-between px-4 py-2.5 border-b border-white/5 hover:bg-white/[0.02] transition-colors"
+      >
+        <div className="flex items-center gap-2">
+          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${POS_STYLE[position]}`}>
+            {position}
+          </span>
+          <span className="text-xs font-semibold text-fpl_text">
+            {position === 'ALL' ? 'All players (by xPts)'
+              : position === 'GK' ? 'Goalkeepers'
+                : position === 'DEF' ? 'Defenders'
+                  : position === 'MID' ? 'Midfielders'
+                    : 'Forwards'}
+          </span>
+          <span className="text-[10px] text-fpl_text/30">
+            ({sorted.length})
+          </span>
+        </div>
+        {hasMore && (
+          <span className="text-[10px] text-primary/70">
+            {expanded ? '▲ Show top' : `▼ All ${sorted.length}`}
+          </span>
+        )}
+      </button>
+
+      {/* Column headers */}
+      <div
+        className="grid gap-1.5 px-4 py-1.5 border-b border-white/5 bg-white/[0.01]"
+        style={{ gridTemplateColumns: COLS }}
+      >
+        <span className="text-[9px] text-fpl_text/25">#</span>
+        <span className="text-[9px] text-fpl_text/25">Player</span>
+        <span className={`text-[9px] text-right ${sortBy === 'xPts' ? 'text-primary/60 font-bold' : 'text-fpl_text/25'}`}>xPts</span>
+        <span className={`text-[9px] text-right ${sortBy === 'actual' ? 'text-fpl_text/80 font-bold' : 'text-fpl_text/25'}`}>Actual</span>
+        <span className="text-[9px] text-fpl_text/25 text-right">+/-</span>
+      </div>
+
+      {visible.map((p, i) => (
+        <PlayerRow key={p.id} player={p} idx={i} gwHasResults={gwHasResults} sortBy={sortBy} />
+      ))}
+    </div>
+  )
+}
+
+export default function StatsScreen({ agentData = null, agentError = null, userInput = null }) {
+  const [sortBy, setSortBy] = useState('xPts')
+
+  // Show error state if agent failed and no data
+  if (agentError && !agentData) {
+    return (
+      <div className="flex flex-col gap-4 pb-6">
+        <div>
+          <p className="text-xs text-fpl_text/40 uppercase tracking-widest">Agent 1 Output</p>
+          <p className="text-lg font-black text-fpl_text">Statistician Report</p>
+        </div>
+        <div className="bg-danger/10 border border-danger/30 rounded-2xl p-6 text-center flex flex-col gap-3">
+          <p className="text-danger font-bold text-sm">Agent Error</p>
+          <p className="text-xs text-danger/70 font-mono break-words">{agentError}</p>
+          <p className="text-[11px] text-fpl_text/40 mt-1">
+            Make sure the backend is running:<br />
+            <span className="font-mono text-fpl_text/60">python -m uvicorn backend.main:app --port 8006</span>
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!agentData) return null
+
+  const { rankedPlayers, injuryAlerts, globalTop11XPts, squadXPts } = agentData
+
+  if (!rankedPlayers?.length) {
+    return (
+      <div className="flex flex-col gap-4 pb-6">
+        <div>
+          <p className="text-xs text-fpl_text/40 uppercase tracking-widest">Agent 1 Output</p>
+          <p className="text-lg font-black text-fpl_text">Statistician Report</p>
+        </div>
+        <div className="bg-amber/10 border border-amber/20 rounded-2xl p-6 text-center">
+          <p className="text-amber font-bold text-sm">No player rows in stats payload</p>
+          <p className="text-[11px] text-fpl_text/50 mt-2">
+            Restart the FastAPI server (cache clears on schema change), confirm Vite proxies to the same port (<span className="font-mono">VITE_API_PROXY</span> in <span className="font-mono">app/.env.local</span>), then run the optimizer again.
+          </p>
+        </div>
+      </div>
+    )
+  }
+  const squadTotalXPts = squadXPts ?? globalTop11XPts
+
+  const bucketCount = agentData.byPosition
+    ? Object.values(agentData.byPosition).reduce((n, arr) => n + (arr?.length ?? 0), 0)
+    : 0
+  const byPosition =
+    bucketCount > 0 && agentData.byPosition
+      ? agentData.byPosition
+      : {
+          GK:  rankedPlayers.filter(p => p.position === 'GK' || p.position === 'GKP'),
+          DEF: rankedPlayers.filter(p => p.position === 'DEF'),
+          MID: rankedPlayers.filter(p => p.position === 'MID'),
+          FWD: rankedPlayers.filter(p => p.position === 'FWD'),
+        }
+
+  const totalInBuckets = POSITIONS.reduce(
+    (n, pos) => n + (byPosition[pos]?.length ?? 0),
+    0,
+  )
+  // Stale API cache or missing identity fields → every row position is "—" and all buckets empty.
+  // Still show xPts in one list so the screen is never blank while predictions exist.
+  const positionSections =
+    totalInBuckets === 0 && rankedPlayers.length > 0
+      ? [{ pos: 'ALL', players: [...rankedPlayers].sort((a, b) => b.xPts - a.xPts) }]
+      : POSITIONS.map(pos => ({ pos, players: byPosition[pos] || [] }))
+
+  const gwHasActualScores = agentData.gwHasActualScores === true
+
+  const squadIds = new Set(userInput?.isLiveData ? (userInput?.squadIds ?? []) : [])
+  const squadInjuries = injuryAlerts.filter(p => squadIds.has(p.id))
 
   return (
     <div className="flex flex-col gap-4 pb-6">
+      {/* Header */}
       <div>
         <p className="text-xs text-fpl_text/40 uppercase tracking-widest">Agent 1 Output</p>
         <p className="text-lg font-black text-fpl_text">Statistician Report</p>
+        <p className="text-[10px] text-primary/70 mt-0.5">
+          {userInput?.isLiveData ? '● Live FPL import' : '● Demo squad'} · xPts model GW{agentData.gameweek}
+          {agentData.planningGameweek != null && agentData.planningGameweek !== agentData.gameweek
+            ? ` · transfer plan GW${agentData.planningGameweek}`
+            : ''}{' '}
+          · XGBoost
+        </p>
       </div>
 
       {/* Summary pills */}
@@ -27,148 +226,84 @@ export default function StatsScreen() {
         <div className="bg-card rounded-xl p-3 border border-white/5">
           <p className="text-[10px] text-fpl_text/40 uppercase tracking-widest">Squad xPts</p>
           <p className="text-2xl font-black text-fpl_text">{squadTotalXPts}</p>
-          <p className="text-[10px] text-fpl_text/40">current starting 11</p>
+          <p className="text-[10px] text-fpl_text/40">top 11 by predicted pts</p>
         </div>
         <div className="bg-danger/10 border border-danger/20 rounded-xl p-3">
           <p className="text-[10px] text-danger/70 uppercase tracking-widest">Injury Alerts</p>
-          <p className="text-2xl font-black text-danger">{injuryAlerts.length}</p>
-          <p className="text-[10px] text-danger/60">{injuryAlerts.map(p => p.name).join(', ')}</p>
+          <p className="text-2xl font-black text-danger">{injuryAlerts?.length ?? 0}</p>
+          <p className="text-[10px] text-danger/60">
+            {injuryAlerts?.length ? (squadInjuries.length ? `${squadInjuries.length} in your squad` : 'See alerts below') : 'All clear'}
+          </p>
         </div>
       </div>
 
-      {/* Tab bar */}
-      <div className="flex gap-1 bg-card rounded-xl p-1 border border-white/5">
-        {TABS.map((t, i) => (
+      {!gwHasActualScores && (
+        <p className="text-[10px] text-fpl_text/40 text-center px-2">
+          Actual points show here once this gameweek is in your data (after you run the data refresh).
+        </p>
+      )}
+
+      {/* Sort toggle */}
+      {gwHasActualScores && (
+        <div className="flex items-center justify-center gap-1 bg-card rounded-xl p-1 border border-white/5">
           <button
-            key={t}
-            onClick={() => setTab(i)}
+            onClick={() => setSortBy('xPts')}
             className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-all
-              ${tab === i ? 'bg-primary text-background' : 'text-fpl_text/40 hover:text-fpl_text'}`}
+              ${sortBy === 'xPts' ? 'bg-primary text-background' : 'text-fpl_text/40 hover:text-fpl_text'}`}
           >
-            {t}
+            Sort by Predicted xPts
           </button>
-        ))}
-      </div>
-
-      {/* Tab 0: Top 11 xPts */}
-      {tab === 0 && (
-        <div className="bg-card rounded-xl border border-white/5 overflow-hidden">
-          {/* Table header */}
-          <div className="grid grid-cols-[1.5rem_1fr_2.5rem_3rem_3rem] gap-2 px-4 py-2 border-b border-white/5">
-            <span className="text-[10px] text-fpl_text/30">#</span>
-            <span className="text-[10px] text-fpl_text/30">Player</span>
-            <span className="text-[10px] text-fpl_text/30 text-center">Pos</span>
-            <span className="text-[10px] text-fpl_text/30 text-right">xPts</span>
-            <span className="text-[10px] text-fpl_text/30 text-right">FDR</span>
-          </div>
-          {rankedPlayers.map((player, i) => (
-            <div
-              key={player.id}
-              className={`grid grid-cols-[1.5rem_1fr_2.5rem_3rem_3rem] gap-2 px-4 py-3 border-b border-white/5 last:border-0
-                ${player.injured ? 'bg-amber/5' : i % 2 === 0 ? 'bg-transparent' : 'bg-white/[0.02]'}`}
-            >
-              <span className="text-[11px] text-fpl_text/30 self-center">{i + 1}</span>
-              <div className="min-w-0 self-center">
-                <div className="flex items-center gap-1.5">
-                  <p className="text-xs font-semibold text-fpl_text truncate">{player.name}</p>
-                  {player.injured && <span className="text-[10px]">⚠️</span>}
-                </div>
-                <p className="text-[10px] text-fpl_text/40">{player.team} · {player.nextFixture}</p>
-              </div>
-              <span className="text-[10px] font-bold text-fpl_text/60 self-center text-center">{player.position}</span>
-              <span className={`text-sm font-black self-center text-right ${XPTS_COLOR(player.adjustedXPts)}`}>
-                {player.adjustedXPts.toFixed(1)}
-              </span>
-              <div className="self-center flex justify-end">{FDR_BADGE(player.fixtureDifficulty)}</div>
-            </div>
-          ))}
+          <button
+            onClick={() => setSortBy('actual')}
+            className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-all
+              ${sortBy === 'actual' ? 'bg-primary text-background' : 'text-fpl_text/40 hover:text-fpl_text'}`}
+          >
+            Sort by Actual Pts
+          </button>
         </div>
       )}
 
-      {/* Tab 1: Full Stats */}
-      {tab === 1 && (
-        <div className="bg-card rounded-xl border border-white/5 overflow-hidden overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b border-white/5">
-                {['Player', 'xPts', 'xG', 'xA', 'Form', 'Own%'].map(h => (
-                  <th key={h} className="text-left px-3 py-2 text-fpl_text/30 font-semibold text-[10px] whitespace-nowrap">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rankedPlayers.map((p, i) => (
-                <tr key={p.id} className={`border-b border-white/5 last:border-0 ${i % 2 === 0 ? '' : 'bg-white/[0.02]'}`}>
-                  <td className="px-3 py-2.5">
-                    <div className="flex items-center gap-1.5">
-                      <span className={`text-[9px] font-bold px-1 py-0.5 rounded
-                        ${p.position === 'GKP' ? 'bg-amber/20 text-amber' :
-                          p.position === 'DEF' ? 'bg-blue-500/20 text-blue-300' :
-                          p.position === 'MID' ? 'bg-primary/20 text-primary' :
-                          'bg-danger/20 text-danger'}`}>
-                        {p.position}
-                      </span>
-                      <span className="text-fpl_text font-medium truncate max-w-[80px]">{p.name}</span>
-                      {p.injured && <span className="text-[9px]">⚠️</span>}
-                    </div>
-                  </td>
-                  <td className={`px-3 py-2.5 font-black ${XPTS_COLOR(p.adjustedXPts)}`}>{p.adjustedXPts.toFixed(1)}</td>
-                  <td className="px-3 py-2.5 text-fpl_text/70">{p.xG.toFixed(2)}</td>
-                  <td className="px-3 py-2.5 text-fpl_text/70">{p.xA.toFixed(2)}</td>
-                  <td className="px-3 py-2.5 text-fpl_text/70">{p.form}</td>
-                  <td className="px-3 py-2.5 text-fpl_text/50">{p.ownership}%</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/* Tab 2: Risk Matrix */}
-      {tab === 2 && (
-        <div className="flex flex-col gap-2">
-          {rankedPlayers.map(p => (
-            <div key={p.id} className={`bg-card rounded-xl p-3 border ${p.injured ? 'border-amber/20' : 'border-white/5'}`}>
-              <div className="flex items-center justify-between mb-2">
-                <div>
-                  <span className="text-xs font-semibold text-fpl_text">{p.name}</span>
-                  {p.injured && <span className="ml-1 text-[10px]">⚠️</span>}
-                  <p className="text-[10px] text-fpl_text/40">{p.team}</p>
-                </div>
-                <div className="text-right">
-                  <p className={`text-sm font-black ${XPTS_COLOR(p.adjustedXPts)}`}>{p.adjustedXPts.toFixed(1)} xPts</p>
-                  <p className="text-[10px] text-fpl_text/40">±{p.variance.toFixed(1)} variance</p>
-                </div>
-              </div>
-              {/* Variance bar */}
-              <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
-                <div
-                  className="h-full rounded-full"
-                  style={{
-                    width: `${(p.variance / 5) * 100}%`,
-                    backgroundColor: p.variance > 3.5 ? '#E63946' : p.variance > 2.5 ? '#FFB703' : '#00FF87',
-                  }}
-                />
-              </div>
-              <div className="flex justify-between text-[9px] text-fpl_text/25 mt-0.5">
-                <span>Low risk</span>
-                <span>High risk</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      {/* Position sections (or single "All players" if buckets are empty but xPts exist) */}
+      {positionSections.map(({ pos, players }) => (
+        <PositionSection
+          key={pos}
+          position={pos}
+          players={players}
+          limit={POSITION_LIMITS[pos] ?? 50}
+          gwHasResults={gwHasActualScores}
+          sortBy={sortBy}
+        />
+      ))}
 
       {/* Injury alert banner */}
-      {injuryAlerts.length > 0 && (
+      {injuryAlerts?.length > 0 && (
         <div className="bg-amber/10 border border-amber/20 rounded-xl p-4">
-          <p className="text-amber font-bold text-xs mb-1">⚠️ Injury Alerts</p>
-          {injuryAlerts.map(p => (
-            <p key={p.id} className="text-xs text-amber/80">
-              {p.name} ({p.position}, {p.team ?? ''}) — Doubtful · xPts reduced to {p.adjustedXPts.toFixed(1)}
-            </p>
-          ))}
-          <p className="text-[10px] text-amber/50 mt-1">Transfer recommendation: move out injured players before GW starts</p>
+          <p className="text-amber font-bold text-xs mb-2">⚠️ FPL Injury & Availability Alerts</p>
+          <div className="flex flex-col gap-1.5">
+            {injuryAlerts.map(p => (
+              <div key={p.id} className="flex items-start gap-2">
+                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded shrink-0 mt-0.5
+                  ${p.statusCode === 'i' ? 'bg-danger/30 text-danger' :
+                    p.statusCode === 's' ? 'bg-danger/30 text-danger' :
+                    'bg-amber/30 text-amber'}`}>
+                  {p.statusLabel}
+                </span>
+                <div className="min-w-0">
+                  <p className="text-xs text-amber/90 font-semibold flex items-center flex-wrap gap-1">
+                    {p.name}
+                    <span className="text-amber/50 font-normal"> · {p.position} · {p.team}</span>
+                    {p.startProb != null && (
+                      <span className="text-amber/50 font-normal"> · {(p.startProb * 100).toFixed(0)}% chance</span>
+                    )}
+                    {squadIds.has(p.id) && (
+                      <span className="text-[9px] font-bold bg-danger/30 text-danger px-1.5 py-0.5 rounded ml-1">YOUR SQUAD</span>
+                    )}
+                  </p>
+                  {p.news && <p className="text-[10px] text-amber/50 truncate">{p.news}</p>}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>

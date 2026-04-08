@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from typing import Dict, List, Optional
 
-from .schemas import PlayerProfile, SquadHealthRecord
+from .schemas import PlayerProfile, SquadHealthRecord, safe_int
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,9 @@ class SquadHealthAnalyser:
         if form_stats:
             for record in form_stats:
                 if "element" in record:
-                    form_by_element[int(record["element"])] = record
+                    eid = safe_int(record.get("element"), None)
+                    if eid is not None and eid > 0:
+                        form_by_element[eid] = record
                 if "name" in record:
                     form_by_name[record["name"]] = record
 
@@ -128,14 +130,16 @@ class SquadHealthAnalyser:
         # ── Bootstrap data ────────────────────────────────────────────────────
         bs = bootstrap_lookup.get(player.element, {})
         status = bs.get("status", player.status)
-        yellow_cards = int(bs.get("yellow_cards", player.yellow_cards))
+        yc_raw = bs.get("yellow_cards", player.yellow_cards)
+        yellow_cards = safe_int(yc_raw, player.yellow_cards)
 
         # chance_of_playing: prefer next_round, fall back to this_round or player field
         cop = (
             bs.get("chance_of_playing_next_round")
             or bs.get("chance_of_playing_this_round")
         )
-        chance_of_playing = int(cop) if cop is not None else player.chance_of_playing
+        # FPL sometimes sends null; merged data can leave float NaN — int(NaN) raises
+        chance_of_playing = safe_int(cop, player.chance_of_playing)
         is_available = status in ("a", "d")
 
         # ── Form stats ────────────────────────────────────────────────────────
