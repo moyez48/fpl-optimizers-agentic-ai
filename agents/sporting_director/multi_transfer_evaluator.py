@@ -75,7 +75,11 @@ class MultiTransferEvaluator:
         if max_transfers < 2 or not single_transfers:
             return None
 
-        hit_cost_t2 = max(0, 2 - free_transfers) * 4
+        # T2 marginal hit cost: T1 has already paid its hit, so T2 only costs
+        # 4pts if free_transfers < 2 (one more transfer beyond what's free).
+        # The old formula max(0, 2-free_transfers)*4 incorrectly doubled the cost
+        # to 8pts when free_transfers=0, rejecting valid T2s.
+        hit_cost_t2 = 0 if free_transfers >= 2 else 4
         best_pair: Optional[Tuple[TransferOption, TransferOption]] = None
         best_combined_vorp = float("-inf")
 

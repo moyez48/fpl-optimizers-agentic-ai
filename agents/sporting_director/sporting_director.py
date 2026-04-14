@@ -288,6 +288,10 @@ class SportingDirectorAgent:
         )
 
         hit_cost = max(0, 1 - squad.free_transfers) * 4
+        # A rolled free transfer is worth ~0.5 pts in expectation (optionality value).
+        # Require that gain clears this floor so we don't recommend sideways moves.
+        FT_OPPORTUNITY_COST = 0.5
+        min_gain = hit_cost + (FT_OPPORTUNITY_COST if hit_cost == 0 else 0)
         options:  List[TransferOption] = []
 
         for sell in self.validator.get_sellable_players(squad):
@@ -298,8 +302,8 @@ class SportingDirectorAgent:
 
             for buy in buyable:
                 expected_gain = buy.expected_pts - sell.expected_pts
-                if expected_gain <= hit_cost:
-                    continue   # doesn't clear the gate
+                if expected_gain <= min_gain:
+                    continue   # doesn't clear the gate (includes FT opportunity cost)
 
                 buy_vorp  = position_stats.get(buy.position, {}).get(
                     "vorp_scores", {}
@@ -338,7 +342,18 @@ class SportingDirectorAgent:
 
         # Rank by vorp_gain desc, cost_delta asc as tiebreaker
         ranked = sorted(options, key=lambda o: (-o.vorp_gain, o.cost_delta))
-        top    = ranked[: self.top_n]
+
+        # Deduplicate: keep only the best-ranked option per sell player and per buy player
+        seen_sell: set = set()
+        seen_buy:  set = set()
+        deduped: List[TransferOption] = []
+        for opt in ranked:
+            if opt.sell.element not in seen_sell and opt.buy.element not in seen_buy:
+                seen_sell.add(opt.sell.element)
+                seen_buy.add(opt.buy.element)
+                deduped.append(opt)
+
+        top = deduped[: self.top_n]
 
         log.append(
             f"[5] score_single_transfers: {len(options)} pairs passed gate; "
@@ -451,7 +466,17 @@ class SportingDirectorAgent:
             else:
                 transfers = transfers + [t1, t2]
 
-        return transfers
+        # Deduplicate by (sell, buy) pair — T1 of multi_pair is drawn from
+        # single_options so it would otherwise appear twice in the list
+        seen: set = set()
+        deduped: List[TransferOption] = []
+        for t in transfers:
+            key = (t.sell.element, t.buy.element)
+            if key not in seen:
+                seen.add(key)
+                deduped.append(t)
+
+        return deduped
 
     # ── Summary ───────────────────────────────────────────────────────────────
 

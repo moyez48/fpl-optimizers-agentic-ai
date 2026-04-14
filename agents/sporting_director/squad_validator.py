@@ -122,12 +122,12 @@ class SquadValidator:
         """
         violations = []
 
-        # 1. Sell must be in squad
-        if not any(p.name == sell.name for p in squad.players):
+        # 1. Sell must be in squad (match by element ID — names are not unique)
+        if not any(p.element == sell.element for p in squad.players):
             violations.append(f"{sell.name} is not in the squad")
 
-        # 2. Buy must not already be in squad
-        if any(p.name == buy.name for p in squad.players):
+        # 2. Buy must not already be in squad (match by element ID)
+        if any(p.element == buy.element for p in squad.players):
             violations.append(f"{buy.name} is already in the squad")
 
         # 3. Same position
