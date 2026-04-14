@@ -338,7 +338,18 @@ class SportingDirectorAgent:
 
         # Rank by vorp_gain desc, cost_delta asc as tiebreaker
         ranked = sorted(options, key=lambda o: (-o.vorp_gain, o.cost_delta))
-        top    = ranked[: self.top_n]
+
+        # Deduplicate: keep only the best-ranked option per sell player and per buy player
+        seen_sell: set = set()
+        seen_buy:  set = set()
+        deduped: List[TransferOption] = []
+        for opt in ranked:
+            if opt.sell.element not in seen_sell and opt.buy.element not in seen_buy:
+                seen_sell.add(opt.sell.element)
+                seen_buy.add(opt.buy.element)
+                deduped.append(opt)
+
+        top = deduped[: self.top_n]
 
         log.append(
             f"[5] score_single_transfers: {len(options)} pairs passed gate; "
@@ -451,7 +462,17 @@ class SportingDirectorAgent:
             else:
                 transfers = transfers + [t1, t2]
 
-        return transfers
+        # Deduplicate by (sell, buy) pair — T1 of multi_pair is drawn from
+        # single_options so it would otherwise appear twice in the list
+        seen: set = set()
+        deduped: List[TransferOption] = []
+        for t in transfers:
+            key = (t.sell.element, t.buy.element)
+            if key not in seen:
+                seen.add(key)
+                deduped.append(t)
+
+        return deduped
 
     # ── Summary ───────────────────────────────────────────────────────────────
 
