@@ -79,7 +79,10 @@ class TransferScorer:
             A fully populated TransferOption, including score and reasoning.
         """
         # ── Budget ────────────────────────────────────────────────────────────
-        cost_delta     = round(buy.cost - sell.cost, 1)
+        # Use sell_price (price-lock adjusted) not cost — a risen player's
+        # sell proceeds are capped at purchase_price + 50% of the rise.
+        effective_sell = sell.sell_price if sell.sell_price > 0 else sell.cost
+        cost_delta     = round(buy.cost - effective_sell, 1)
         remaining_bank = round(squad.bank - cost_delta, 1)
 
         # ── Gain metrics (buy − sell) ──────────────────────────────────────────

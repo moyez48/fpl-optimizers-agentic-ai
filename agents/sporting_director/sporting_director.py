@@ -288,6 +288,10 @@ class SportingDirectorAgent:
         )
 
         hit_cost = max(0, 1 - squad.free_transfers) * 4
+        # A rolled free transfer is worth ~0.5 pts in expectation (optionality value).
+        # Require that gain clears this floor so we don't recommend sideways moves.
+        FT_OPPORTUNITY_COST = 0.5
+        min_gain = hit_cost + (FT_OPPORTUNITY_COST if hit_cost == 0 else 0)
         options:  List[TransferOption] = []
 
         for sell in self.validator.get_sellable_players(squad):
@@ -298,8 +302,8 @@ class SportingDirectorAgent:
 
             for buy in buyable:
                 expected_gain = buy.expected_pts - sell.expected_pts
-                if expected_gain <= hit_cost:
-                    continue   # doesn't clear the gate
+                if expected_gain <= min_gain:
+                    continue   # doesn't clear the gate (includes FT opportunity cost)
 
                 buy_vorp  = position_stats.get(buy.position, {}).get(
                     "vorp_scores", {}
