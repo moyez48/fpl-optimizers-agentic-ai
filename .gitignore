@@ -35,3 +35,6 @@ __pycache__/
 .claude/
 *.bak
 *.bak2
+
+# WIP evaluation notes (position-stratified metrics; iterate locally)
+analysis/position_stratified_evaluation.md

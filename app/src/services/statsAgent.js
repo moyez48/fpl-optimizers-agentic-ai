@@ -308,7 +308,7 @@ export function adaptToStatsOutput(apiResponse, squadIds = null) {
       adjustedXPts:  xPtsCore,
       predictedPts:  finiteFixed(p.predicted_pts ?? 0, 1),
       actualPts:     pickActualPoints(p),
-      startProb:     finiteFixed(p.start_prob ?? 0.7, 2),
+      startProb:     finiteFixed(p.start_prob ?? 0.25, 2),
       form:          finiteFixed(form.avg_pts_last5 ?? 0, 1),
       formTrend:     finiteFixed(form.form_trend ?? 0, 2),
       xG:            finiteFixed((form.goals_last5 ?? 0) / gws, 2),
@@ -328,6 +328,8 @@ export function adaptToStatsOutput(apiResponse, squadIds = null) {
       variance:      finiteFixed((p.predicted_pts ?? 0) * 0.3, 1),
       injured:       p.element != null && injuredElementIds.has(p.element),
       rank:          p.rank ?? 0,
+      likelyToPlay:
+        p.likely_to_play != null ? Boolean(p.likely_to_play) : (p.start_prob ?? 0) >= 0.12,
     }
   }
 
@@ -393,5 +395,6 @@ export function adaptToStatsOutput(apiResponse, squadIds = null) {
     datasetMinGw:         apiResponse.dataset_gw_min ?? null,
     datasetMaxGw:         apiResponse.dataset_gw_max ?? null,
     actualScoresSource:   apiResponse.actual_scores_source ?? null,
+    gwFallbackWarning:    apiResponse.gw_fallback_warning ?? null,
   }
 }

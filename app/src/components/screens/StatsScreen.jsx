@@ -1,4 +1,22 @@
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useRef, useEffect } from 'react'
+
+/** Red “not available” mark: circle with diagonal (prohibition / N/A). */
+function ForbiddenMark({ className = '' }) {
+  return (
+    <svg
+      className={`shrink-0 ${className}`}
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden
+    >
+      <circle cx="12" cy="12" r="9.5" stroke="currentColor" strokeWidth="2" />
+      <path d="M7.5 7.5l9 9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  )
+}
 
 const XPTS_COLOR = (v) => v >= 6 ? 'text-primary' : v >= 3 ? 'text-amber' : 'text-danger'
 
@@ -142,6 +160,7 @@ const ACTUAL_SOURCE_LABEL = {
 export default function StatsScreen({
   agentData = null,
   agentError = null,
+  agentWarning = null,
   userInput = null,
   statsGwLoading = false,
   onGameweekChange,
@@ -149,6 +168,78 @@ export default function StatsScreen({
   selectableGwMax = null,
 }) {
   const [sortBy, setSortBy] = useState('xPts')
+  const [gwMenuOpen, setGwMenuOpen] = useState(false)
+  const [onlyLikelyToPlay, setOnlyLikelyToPlay] = useState(true)
+  const gwPickerRef = useRef(null)
+
+  const rankedPool = agentData?.rankedPlayers
+
+  const displayPlayers = useMemo(() => {
+    if (!rankedPool?.length) return []
+    if (!onlyLikelyToPlay) return rankedPool
+    return rankedPool.filter((p) => {
+      if (p.likelyToPlay === true) return true
+      if (p.likelyToPlay === false) return false
+      return (p.startProb ?? 0) >= 0.12
+    })
+  }, [rankedPool, onlyLikelyToPlay])
+
+  const globalDisplayTop11XPts = useMemo(() => {
+    if (!displayPlayers.length) return 0
+    const top11 = [...displayPlayers].sort((a, b) => b.xPts - a.xPts).slice(0, 11)
+    return parseFloat(top11.reduce((s, p) => s + p.xPts, 0).toFixed(1))
+  }, [displayPlayers])
+
+  const displaySquadXPtsMemo = useMemo(() => {
+    const sp = agentData?.squadPlayers
+    if (!sp?.length) return null
+    const pool = onlyLikelyToPlay
+      ? sp.filter((p) => {
+          if (p.likelyToPlay === true) return true
+          if (p.likelyToPlay === false) return false
+          return (p.startProb ?? 0) >= 0.12
+        })
+      : sp
+    if (!pool.length) return 0
+    const top11 = [...pool].sort((a, b) => b.xPts - a.xPts).slice(0, 11)
+    return parseFloat(top11.reduce((s, p) => s + p.xPts, 0).toFixed(1))
+  }, [agentData?.squadPlayers, onlyLikelyToPlay])
+
+  const byPosition = useMemo(
+    () => ({
+      GK:  displayPlayers.filter(p => p.position === 'GK' || p.position === 'GKP'),
+      DEF: displayPlayers.filter(p => p.position === 'DEF'),
+      MID: displayPlayers.filter(p => p.position === 'MID'),
+      FWD: displayPlayers.filter(p => p.position === 'FWD'),
+    }),
+    [displayPlayers],
+  )
+
+  const positionSections = useMemo(() => {
+    const totalInBuckets = POSITIONS.reduce(
+      (n, pos) => n + (byPosition[pos]?.length ?? 0),
+      0,
+    )
+    if (totalInBuckets === 0 && displayPlayers.length > 0) {
+      return [{ pos: 'ALL', players: [...displayPlayers].sort((a, b) => b.xPts - a.xPts) }]
+    }
+    return POSITIONS.map(pos => ({ pos, players: byPosition[pos] || [] }))
+  }, [byPosition, displayPlayers])
+
+  useEffect(() => {
+    if (!gwMenuOpen) return
+    const onDocDown = (e) => {
+      if (gwPickerRef.current && !gwPickerRef.current.contains(e.target)) {
+        setGwMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDocDown)
+    return () => document.removeEventListener('mousedown', onDocDown)
+  }, [gwMenuOpen])
+
+  useEffect(() => {
+    if (statsGwLoading) setGwMenuOpen(false)
+  }, [statsGwLoading])
 
   // Show error state if agent failed and no data
   if (agentError && !agentData) {
@@ -172,7 +263,7 @@ export default function StatsScreen({
 
   if (!agentData) return null
 
-  const { rankedPlayers, globalTop11XPts, squadXPts } = agentData
+  const { rankedPlayers } = agentData
 
   if (!rankedPlayers?.length) {
     return (
@@ -190,35 +281,13 @@ export default function StatsScreen({
       </div>
     )
   }
-  const squadTotalXPts = squadXPts ?? globalTop11XPts
-
-  const bucketCount = agentData.byPosition
-    ? Object.values(agentData.byPosition).reduce((n, arr) => n + (arr?.length ?? 0), 0)
-    : 0
-  const byPosition =
-    bucketCount > 0 && agentData.byPosition
-      ? agentData.byPosition
-      : {
-          GK:  rankedPlayers.filter(p => p.position === 'GK' || p.position === 'GKP'),
-          DEF: rankedPlayers.filter(p => p.position === 'DEF'),
-          MID: rankedPlayers.filter(p => p.position === 'MID'),
-          FWD: rankedPlayers.filter(p => p.position === 'FWD'),
-        }
-
-  const totalInBuckets = POSITIONS.reduce(
-    (n, pos) => n + (byPosition[pos]?.length ?? 0),
-    0,
-  )
-  // Stale API cache or missing identity fields → every row position is "—" and all buckets empty.
-  // Still show xPts in one list so the screen is never blank while predictions exist.
-  const positionSections =
-    totalInBuckets === 0 && rankedPlayers.length > 0
-      ? [{ pos: 'ALL', players: [...rankedPlayers].sort((a, b) => b.xPts - a.xPts) }]
-      : POSITIONS.map(pos => ({ pos, players: byPosition[pos] || [] }))
+  const squadTotalXPts = displaySquadXPtsMemo ?? globalDisplayTop11XPts
 
   const gwHasActualScores = agentData.gwHasActualScores === true
   const dsMin = agentData.datasetMinGw
-  const dsMax = selectableGwMax ?? agentData.datasetMaxGw
+  /** Upper bound for selectable GWs: dataset max from API, else cap state, else current GW (conservative). */
+  const gwCap = selectableGwMax ?? agentData.datasetMaxGw ?? agentData.gameweek ?? null
+  const dsMaxLabel = agentData.datasetMaxGw ?? gwCap
   const actualSrcKey = agentData.actualScoresSource
   const actualSrcLabel =
     actualSrcKey && ACTUAL_SOURCE_LABEL[actualSrcKey] ? ACTUAL_SOURCE_LABEL[actualSrcKey] : null
@@ -236,7 +305,29 @@ export default function StatsScreen({
             : ''}{' '}
           · XGBoost
         </p>
+        <label className="mt-2 flex items-center gap-2 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            className="rounded border-white/20 bg-background text-primary focus:ring-primary/40"
+            checked={onlyLikelyToPlay}
+            onChange={() => setOnlyLikelyToPlay((v) => !v)}
+          />
+          <span className="text-[10px] text-fpl_text/45">
+            Likely to play only (start probability ≥ 12% — from minutes, form & FPL injury flags)
+          </span>
+        </label>
+        {onlyLikelyToPlay && (
+          <p className="text-[10px] text-fpl_text/35">
+            Showing {displayPlayers.length} of {rankedPlayers.length} players · xPts = pred × start%
+          </p>
+        )}
       </div>
+
+      {agentWarning && (
+        <div className="bg-amber/10 border border-amber/25 rounded-xl px-3 py-2">
+          <p className="text-[11px] text-amber font-semibold">{agentWarning}</p>
+        </div>
+      )}
 
       {agentError && agentData && (
         <div className="bg-danger/10 border border-danger/25 rounded-xl px-3 py-2">
@@ -245,39 +336,86 @@ export default function StatsScreen({
         </div>
       )}
 
-      {/* Gameweek selector — predictions only exist for GWs present in the processed dataset */}
+      {/* Gameweek selector — custom list so future GWs can be blurred + show prohibition on click */}
       <div className="bg-card rounded-xl p-3 border border-white/5 flex flex-col gap-2">
-        <label htmlFor="stats-gw-select" className="text-[10px] text-fpl_text/40 uppercase tracking-widest">
+        <label htmlFor="stats-gw-picker-trigger" className="text-[10px] text-fpl_text/40 uppercase tracking-widest">
           View gameweek
         </label>
         <div className="flex items-center gap-2 flex-wrap">
-          <select
-            id="stats-gw-select"
-            value={agentData.gameweek ?? 1}
-            disabled={statsGwLoading || typeof onGameweekChange !== 'function'}
-            onChange={(e) => onGameweekChange?.(Number(e.target.value))}
-            className="flex-1 min-w-[8rem] bg-background border border-white/10 rounded-lg px-3 py-2 text-sm font-semibold text-fpl_text
-              disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-1 focus:ring-primary/40"
-          >
-            {Array.from({ length: 38 }, (_, i) => i + 1).map((gw) => {
-              const noData = dsMax != null && gw > dsMax
-              return (
-                <option key={gw} value={gw} disabled={noData}>
-                  GW{gw}
-                  {noData ? ' — N/A (add this GW to your dataset first)' : ''}
-                </option>
-              )
-            })}
-          </select>
+          <div className="relative flex-1 min-w-[8rem]" ref={gwPickerRef}>
+            <button
+              id="stats-gw-picker-trigger"
+              type="button"
+              disabled={statsGwLoading || typeof onGameweekChange !== 'function'}
+              onClick={() => {
+                if (statsGwLoading || !onGameweekChange) return
+                setGwMenuOpen((o) => !o)
+              }}
+              aria-expanded={gwMenuOpen}
+              aria-haspopup="listbox"
+              className="w-full flex items-center justify-between gap-2 bg-background border border-white/10 rounded-lg px-3 py-2 text-sm font-semibold text-fpl_text
+                disabled:opacity-50 disabled:cursor-not-allowed
+                enabled:hover:border-primary/30 transition-colors
+                focus:outline-none focus:ring-1 focus:ring-primary/40"
+            >
+              <span>GW{agentData.gameweek ?? 1}</span>
+              <span className="text-[10px] text-fpl_text/45">{gwMenuOpen ? '▲' : '▼'}</span>
+            </button>
+            {gwMenuOpen && (
+              <ul
+                role="listbox"
+                aria-labelledby="stats-gw-picker-trigger"
+                className="absolute left-0 right-0 top-full z-50 mt-1 max-h-56 overflow-y-auto rounded-lg border border-white/10 bg-surface py-1 shadow-xl"
+              >
+                {Array.from({ length: 38 }, (_, i) => i + 1).map((gw) => {
+                  const locked = gwCap != null && gw > gwCap
+                  const selected = (agentData.gameweek ?? 1) === gw
+                  return (
+                    <li key={gw} role="presentation">
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={selected}
+                        disabled={locked}
+                        onClick={() => {
+                          onGameweekChange(gw)
+                          setGwMenuOpen(false)
+                        }}
+                        className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-left text-sm transition-colors
+                          ${locked
+                            ? 'cursor-not-allowed text-fpl_text/35 opacity-50 blur-[0.5px]'
+                            : `cursor-pointer hover:bg-white/[0.06] ${selected ? 'text-primary font-bold bg-primary/10' : 'text-fpl_text'}`}`}
+                      >
+                        <span className={locked ? 'select-none' : ''}>
+                          GW{gw}
+                          {locked ? ' — N/A' : ''}
+                        </span>
+                        {locked ? (
+                          <ForbiddenMark className="h-3.5 w-3.5 shrink-0 text-danger/70" />
+                        ) : selected ? (
+                          <span className="text-[10px] text-primary">●</span>
+                        ) : (
+                          <span className="w-4" />
+                        )}
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </div>
           {statsGwLoading && (
             <span className="text-[10px] font-semibold text-primary animate-pulse">Loading…</span>
           )}
         </div>
-        {dsMin != null && dsMax != null && (
+        {dsMin != null && dsMaxLabel != null && (
           <p className="text-[10px] text-fpl_text/40">
-            Model features cover GW{dsMin}–GW{dsMax} in your CSV. Later gameweeks stay disabled until that week is processed.
+            Model features cover GW{dsMin}–GW{dsMaxLabel} in your CSV. Later gameweeks are disabled until that week exists in your data.
           </p>
         )}
+        <p className="text-[10px] text-fpl_text/35">
+          xPts = model prediction × start probability.
+        </p>
         {actualSrcLabel && (
           <p className="text-[10px] text-fpl_text/35">
             Actual points column: <span className="text-fpl_text/55">{actualSrcLabel}</span>
@@ -315,6 +453,12 @@ export default function StatsScreen({
           >
             Sort by Actual Pts
           </button>
+        </div>
+      )}
+
+      {onlyLikelyToPlay && displayPlayers.length === 0 && rankedPlayers.length > 0 && (
+        <div className="bg-amber/10 border border-amber/20 rounded-xl p-3 text-center text-[11px] text-amber">
+          No players meet the start-probability threshold. Turn off &quot;Likely to play only&quot; above to see the full list.
         </div>
       )}
 

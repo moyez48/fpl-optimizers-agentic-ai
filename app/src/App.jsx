@@ -35,6 +35,7 @@ export default function App() {
   const [agentData, setAgentData] = useState(null)
   const [agentError, setAgentError] = useState(null)
   const [statsGwLoading, setStatsGwLoading] = useState(false)
+  const [agentWarning, setAgentWarning] = useState(null)
   /** Upper GW bound for the CSV/model (from API or inferred when a bad GW request fails). */
   const [gwDatasetCap, setGwDatasetCap] = useState(null)
 
@@ -119,9 +120,11 @@ export default function App() {
         adapted.planningGameweek = adapted.transferRecommendation.planningGameweek
       }
 
-      if (adapted.datasetMaxGw != null) {
-        setGwDatasetCap(adapted.datasetMaxGw)
+      const gwCap = adapted.datasetMaxGw ?? adapted.gameweek
+      if (gwCap != null) {
+        setGwDatasetCap(gwCap)
       }
+      setAgentWarning(adapted.gwFallbackWarning ?? null)
       setAgentData(adapted)
     } catch (err) {
       setAgentError(err.message ?? String(err))
@@ -134,6 +137,7 @@ export default function App() {
     setUserInput(null)
     setAgentData(null)
     setAgentError(null)
+    setAgentWarning(null)
     setStatsGwLoading(false)
     setGwDatasetCap(null)
   }
@@ -142,7 +146,7 @@ export default function App() {
     const ui = userInputRef.current
     if (!ui || gw == null || Number.isNaN(Number(gw))) return
     const g = Number(gw)
-    const max = gwDatasetCap ?? agentData?.datasetMaxGw
+    const max = gwDatasetCap ?? agentData?.datasetMaxGw ?? agentData?.gameweek
     if (max != null && g > max) {
       setAgentError(
         `GW${g} is not in the dataset yet (available: GW1–GW${max}). Refresh data after that gameweek is processed.`,
@@ -189,9 +193,11 @@ export default function App() {
         }
       }
 
-      if (adapted.datasetMaxGw != null) {
-        setGwDatasetCap(adapted.datasetMaxGw)
+      const gwCap = adapted.datasetMaxGw ?? adapted.gameweek
+      if (gwCap != null) {
+        setGwDatasetCap(gwCap)
       }
+      setAgentWarning(adapted.gwFallbackWarning ?? null)
       setAgentData(adapted)
     } catch (err) {
       const msg = err.message ?? String(err)
@@ -203,7 +209,7 @@ export default function App() {
     } finally {
       setStatsGwLoading(false)
     }
-  }, [agentData?.datasetMaxGw, gwDatasetCap])
+  }, [agentData?.datasetMaxGw, agentData?.gameweek, gwDatasetCap])
 
   const isResultScreen = [SCREENS.STATS, SCREENS.MANAGER, SCREENS.DASHBOARD].includes(screen)
 
@@ -290,10 +296,11 @@ export default function App() {
           <StatsScreen
             agentData={agentData}
             agentError={agentError}
+            agentWarning={agentWarning}
             userInput={userInput}
             statsGwLoading={statsGwLoading}
             onGameweekChange={handleStatsGameweekChange}
-            selectableGwMax={gwDatasetCap ?? agentData?.datasetMaxGw ?? null}
+            selectableGwMax={gwDatasetCap ?? agentData?.datasetMaxGw ?? agentData?.gameweek ?? null}
           />
         )}
         {screen === SCREENS.MANAGER  && <ManagerScreen agentData={agentData} userInput={userInput} />}

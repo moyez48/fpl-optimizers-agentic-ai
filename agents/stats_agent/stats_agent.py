@@ -72,6 +72,10 @@ with open(META_PATH) as f:
     _meta = json.load(f)
 FEATURES = _meta["training"]["features"]
 
+# UI / filtering: show players at or above this start-probability as "likely to play"
+# (ex-ante; we never know the future for sure — injury + minutes history + FPL flags).
+LIKELY_TO_PLAY_THRESHOLD = 0.12
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # STATE DEFINITION
@@ -100,6 +104,7 @@ class StatsAgentState(TypedDict):
     actual_scores_source: Optional[str]   # "fpl_event_live" | "csv_sanitised" | "none"
     dataset_gw_min: Optional[int]
     dataset_gw_max: Optional[int]
+    gw_fallback_warning: Optional[str]  # Set when requested GW fell back to latest available
 
     # ── Control ───────────────────────────────────────────────────────────────
     error: Optional[str]             # Set by any node on failure
@@ -695,15 +700,22 @@ def run_model(state: StatsAgentState) -> StatsAgentState:
 
         if pred_df.empty:
             mx = int(season_df["GW"].max()) if len(season_df) else 0
-            return {
-                **state,
-                "error": (
-                    f"run_model: no feature rows for {season} GW{target_gw}. "
-                    f"Dataset currently has GW1–GW{mx}. "
-                    f"Refresh processed data to add this gameweek, or pick GW1–GW{mx}."
-                ),
-                "log": log,
-            }
+            if mx == 0:
+                return {
+                    **state,
+                    "error": f"run_model: no data at all for season {season}.",
+                    "log": log,
+                }
+            # Auto-fall back to latest available GW so the app never crashes
+            requested_gw = target_gw
+            target_gw = mx
+            pred_df = season_df[season_df["GW"] == target_gw].copy()
+            warning = (
+                f"GW{requested_gw} is not in the dataset yet "
+                f"(data runs through GW{mx}). Showing GW{mx}."
+            )
+            log.append(f"run_model: {warning}")
+            state = {**state, "gw_fallback_warning": warning}
 
         # Fill any missing features with 0 (conservative default)
         missing = [f for f in FEATURES if f not in pred_df.columns]
@@ -817,22 +829,44 @@ def compute_start_probability(state: StatsAgentState) -> StatsAgentState:
 
         start_probs = {}
         for name in players:
+            elem = pred_elements.get(name)
+
+            # Hard gates from live FPL bootstrap (we cannot know lineups; we can rule some out)
+            if elem is not None and elem in bs_avail:
+                row_bs = bs_avail[elem]
+                st = (row_bs.get("status") or "a").lower()
+                if st in ("u", "n"):  # unavailable / not in PL squad
+                    start_probs[name] = 0.0
+                    continue
+                chance = row_bs.get("chance_of_playing_next_round")
+                if st in ("i", "s") and (chance is None or chance <= 0):
+                    start_probs[name] = 0.0
+                    continue
+
             p_df = season_df[season_df["name"] == name].sort_values("GW").tail(5)
 
-            # Recent start rate from starts column (2022+) or minutes proxy
-            if "starts" in p_df.columns and not p_df["starts"].isna().all():
-                recent_start_rate = p_df.tail(3)["starts"].mean() / 1.0
+            if p_df.empty:
+                recent_start_rate = 0.0
+                avg_min_last5 = 0.0
             else:
-                # minutes >= 45 as proxy for starting
-                recent_start_rate = (p_df.tail(3)["minutes"] >= 45).mean() if "minutes" in p_df.columns else 0.7
+                # Recent start rate from starts column (2022+) or minutes proxy
+                if "starts" in p_df.columns and not p_df["starts"].isna().all():
+                    recent_start_rate = float(p_df.tail(3)["starts"].mean() / 1.0)
+                elif "minutes" in p_df.columns:
+                    recent_start_rate = float((p_df.tail(3)["minutes"] >= 45).mean())
+                else:
+                    recent_start_rate = 0.0
+                if np.isnan(recent_start_rate):
+                    recent_start_rate = 0.0
 
-            # Longer-term minutes (last 5)
-            avg_min_last5 = p_df["minutes"].mean() / 90 if "minutes" in p_df.columns else 0.7
-            avg_min_last5 = min(avg_min_last5, 1.0)
+                # Longer-term minutes (last 5)
+                avg_min_last5 = float(p_df["minutes"].mean() / 90) if "minutes" in p_df.columns else 0.0
+                if np.isnan(avg_min_last5):
+                    avg_min_last5 = 0.0
+                avg_min_last5 = min(avg_min_last5, 1.0)
 
             # FPL availability from bootstrap
-            elem = pred_elements.get(name)
-            if elem and elem in bs_avail:
+            if elem is not None and elem in bs_avail:
                 chance = bs_avail[elem].get("chance_of_playing_next_round")
                 avail = (chance / 100.0) if chance is not None else 1.0
             else:
@@ -878,8 +912,10 @@ def rank_players(state: StatsAgentState) -> StatsAgentState:
                                       "goals_last5", "assists_last5"]], on="name", how="left")
 
         # Add start probability and expected value
-        preds["start_prob"]    = preds["name"].map(probs).fillna(0.7)
-        preds["expected_pts"]  = (preds["predicted_pts"] * preds["start_prob"]).round(3)
+        # Default 0.25 (not 0.7): missing name in start_probs should not read as "likely starter"
+        preds["start_prob"] = preds["name"].map(probs).fillna(0.25)
+        preds["expected_pts"] = (preds["predicted_pts"] * preds["start_prob"]).round(3)
+        preds["likely_to_play"] = preds["start_prob"] >= LIKELY_TO_PLAY_THRESHOLD
         bs_by_id = {
             int(el["id"]): el
             for el in (state.get("bootstrap") or {}).get("elements", [])
@@ -1132,6 +1168,7 @@ def run_stats_agent(gameweek: int | None = None, season: str | None = None) -> d
         "actual_scores_source": None,
         "dataset_gw_min": None,
         "dataset_gw_max": None,
+        "gw_fallback_warning": None,
         "error": None,
         "log": [],
     }
