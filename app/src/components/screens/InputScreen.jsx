@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react'
 import { PLAYERS, DEMO_SQUAD_IDS } from '../../data/players'
 import { isSquadValid, squadErrors, totalPrice, countByPosition } from '../../utils/formations'
-import { importFPLTeam, fetchBootstrap, getCurrentEvent } from '../../services/fplApi'
+import { importFPLTeam, fetchBootstrap, getCurrentEvent, transformPlayers } from '../../services/fplApi'
 import PlayerCard from '../ui/PlayerCard'
 
 const POSITIONS = ['GKP', 'DEF', 'MID', 'FWD']
@@ -23,14 +23,16 @@ export default function InputScreen({ onRun }) {
   const [filterPos, setFilterPos]     = useState('ALL')
   const [showPicker, setShowPicker]   = useState(false)
 
-  // ── Auto-detect current gameweek on mount ────────────────────────────────────
+  // ── Load real FPL players + current gameweek on mount ───────────────────────
   useEffect(() => {
     fetchBootstrap()
       .then(bootstrap => {
         const event = getCurrentEvent(bootstrap.events)
         if (event?.id) setGameweek(event.id)
+        const realPlayers = transformPlayers(bootstrap)
+        if (realPlayers.length > 0) setPlayerPool(realPlayers)
       })
-      .catch(() => {}) // silently keep default if FPL API is unreachable
+      .catch(() => {}) // silently keep fake data if FPL API is unreachable
   }, [])
 
   // ── FPL import state ────────────────────────────────────────────────────────
