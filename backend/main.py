@@ -771,6 +771,23 @@ def get_transfers(req: TransfersRequest):
 
     # stats pipeline row is GW `target_gw`; Sporting Director plans transfers for `next_gw`
     planning_gw = recommendation.gameweek
+
+    # Deduplicate transfer recommendations by (sell_element, buy_element) pair.
+    # The Sporting Director can emit the same pair via both single-transfer and
+    # multi-transfer paths; keep only the copy with the highest net_expected_gain.
+    raw_transfers = rec_dict.get("recommended_transfers", [])
+    seen_pairs: dict[tuple, dict] = {}
+    for t in raw_transfers:
+        key = (
+            t.get("sell", {}).get("element"),
+            t.get("buy", {}).get("element"),
+        )
+        if key not in seen_pairs:
+            seen_pairs[key] = t
+        elif (t.get("net_expected_gain") or 0) > (seen_pairs[key].get("net_expected_gain") or 0):
+            seen_pairs[key] = t
+    deduped_transfers = list(seen_pairs.values())
+
     return _to_json({
         "gameweek":          target_gw,
         "planning_gameweek": planning_gw,
@@ -778,6 +795,6 @@ def get_transfers(req: TransfersRequest):
         "hold_flag":         recommendation.hold_flag,
         "wildcard_flag":     recommendation.wildcard_flag,
         "summary":           recommendation.summary,
-        "transfers":         rec_dict.get("recommended_transfers", []),
+        "transfers":         deduped_transfers,
         "log":               recommendation.log,
     })
