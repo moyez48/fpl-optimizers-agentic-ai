@@ -37,6 +37,10 @@ export async function fetchTeamPicks(teamId, eventId) {
   return apiFetch(`/entry/${teamId}/event/${eventId}/picks/`)
 }
 
+export async function fetchTeamHistory(teamId) {
+  return apiFetch(`/entry/${teamId}/history/`)
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /**
@@ -116,14 +120,68 @@ export function transformPlayers(bootstrap) {
     .map(p => transformElement(p, posMap, teamMap))
 }
 
+// ─── History helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Compute how many free transfers the manager has available for the upcoming GW.
+ * Rules:
+ *  - Start at 1 FT from GW1.
+ *  - Each GW: if transfers <= FTs available → FTs = min(FTs - transfers + 1, 5)
+ *                            else (hit taken) → FTs = 1
+ *  - Wildcard / Free Hit resets FTs to 1 for the following GW.
+ */
+function computeFreeTransfers(historyData) {
+  const { current = [], chips = [] } = historyData
+  const chipsByGw = Object.fromEntries(chips.map(c => [c.event, c.name]))
+
+  let fts = 1
+  for (const gw of current) {
+    const chip = chipsByGw[gw.event]
+    const transfers = gw.event_transfers || 0
+
+    if (chip === 'wildcard' || chip === 'freehit') {
+      fts = 1
+    } else if (transfers <= fts) {
+      fts = Math.min(fts - transfers + 1, 5)
+    } else {
+      fts = 1 // hit taken — still earn 1 FT for next GW
+    }
+  }
+  return fts
+}
+
+/**
+ * Determine which chips are still available.
+ * - Triple Captain (3xc), Bench Boost (bboost), Free Hit (freehit): once per season.
+ * - Wildcard: once per half-season (GWs 1-19 first half, GWs 20-38 second half).
+ */
+function computeAvailableChips(historyData, currentGw) {
+  const { chips = [] } = historyData
+  const usedChipNames = new Set(chips.map(c => c.name))
+
+  const firstHalfBoundary = 19
+  const inSecondHalf = currentGw > firstHalfBoundary
+  const wildcardUsedFirstHalf  = chips.some(c => c.name === 'wildcard' && c.event <= firstHalfBoundary)
+  const wildcardUsedSecondHalf = chips.some(c => c.name === 'wildcard' && c.event >  firstHalfBoundary)
+  const wildcardAvailable = inSecondHalf ? !wildcardUsedSecondHalf : !wildcardUsedFirstHalf
+
+  return {
+    tripleCaptain: !usedChipNames.has('3xc'),
+    benchBoost:    !usedChipNames.has('bboost'),
+    wildcard:      wildcardAvailable,
+    freeHit:       !usedChipNames.has('freehit'),
+  }
+}
+
 // ─── Main import function ─────────────────────────────────────────────────────
 
 /**
  * Full team import flow:
  *  1. Fetch bootstrap-static (all players + current GW)
- *  2. Fetch team info (manager name, team name)
+ *  2. Fetch team info + season history in parallel
  *  3. Fetch picks for current GW
- *  4. Return transformed player pool + squad IDs + metadata
+ *  4. Derive bank, free transfers, and chip availability from real data
+ *  5. Return transformed player pool + squad IDs + metadata
  *
  * @param {number|string} teamId  - FPL manager team ID (visible in FPL URL)
  * @returns {Promise<{
@@ -132,16 +190,19 @@ export function transformPlayers(bootstrap) {
  *   teamInfo: object,
  *   gameweek: number,
  *   bank: number,
+ *   freeTransfers: number,
+ *   chips: { tripleCaptain: boolean, benchBoost: boolean, wildcard: boolean, freeHit: boolean },
  * }>}
  */
 export async function importFPLTeam(teamId) {
   const id = parseInt(teamId, 10)
   if (!id || id <= 0) throw new Error('Enter a valid Team ID (positive integer).')
 
-  // Step 1: Bootstrap + team info in parallel
-  const [bootstrap, teamInfo] = await Promise.all([
+  // Step 1: Bootstrap + team info + history in parallel
+  const [bootstrap, teamInfo, historyData] = await Promise.all([
     fetchBootstrap(),
     fetchTeamInfo(id),
+    fetchTeamHistory(id),
   ])
 
   // Step 2: Determine current GW
@@ -159,6 +220,11 @@ export async function importFPLTeam(teamId) {
   const rawSquadIds = picksData.picks.map(p => p.element)
   const squadIds = rawSquadIds.filter(elemId => playerMap.has(elemId))
 
+  // Step 6: Derive bank, free transfers, and chip availability
+  const bank = (picksData.entry_history?.bank ?? 0) / 10
+  const freeTransfers = computeFreeTransfers(historyData)
+  const chips = computeAvailableChips(historyData, gameweek)
+
   return {
     players,
     squadIds,
@@ -170,6 +236,8 @@ export async function importFPLTeam(teamId) {
       overallRank: teamInfo.summary_overall_rank,
     },
     gameweek,
-    bank: (picksData.entry_history?.bank ?? 0) / 10,
+    bank,
+    freeTransfers,
+    chips,
   }
 }

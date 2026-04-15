@@ -98,6 +98,8 @@ export default function InputScreen({ onRun }) {
       setSquadIds(result.squadIds)
       setGameweek(result.gameweek)
       setBank(parseFloat(result.bank.toFixed(1)))
+      setFreeTransfers(result.freeTransfers)
+      setChips(result.chips)
       setImportedTeamInfo(result.teamInfo)
       setImportStatus(STATUS.SUCCESS)
       setImportMessage(`Loaded GW${result.gameweek} squad — ${result.players.length} real players available.`)
