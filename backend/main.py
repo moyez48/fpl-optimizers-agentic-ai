@@ -201,7 +201,7 @@ _CACHE_TTL = 3600
 
 # Bump when the /api/stats response schema changes so stale cached payloads
 # (e.g. missing actual_points) are not served.
-_CACHE_SCHEMA_VER = "20250410a"
+_CACHE_SCHEMA_VER = "20250414a"
 
 
 def _get_or_run_agent(season: str, gameweek: int | None) -> dict:
