@@ -9,7 +9,8 @@ Algorithm (per spec §7 Node 6):
      a. Simulate post-T1 squad: remove sell, add buy, update bank.
      b. Re-score single transfers on the simulated squad with transfers_used=1
         so hit_cost = max(0, 2 - free_transfers) × 4.
-     c. Find the best T2 (highest vorp_gain) that passes the hit-cost gate.
+     c. Find the best T2 (highest vorp_gain, cost_delta as tiebreaker) that
+        passes the hit-cost gate.
      d. Flag budget_unlock=True if T2's buy was unaffordable pre-T1 but is
         affordable post-T1.
   3. Select the best T1+T2 pair by combined vorp_gain_T1 + vorp_gain_T2.
@@ -19,7 +20,6 @@ Reference: SPORTING_DIRECTOR.md §7 Node 6
 
 from __future__ import annotations
 
-import copy
 from typing import Dict, List, Optional, Tuple
 
 from .schemas import PlayerProfile, Squad, TransferOption
@@ -84,88 +84,11 @@ class MultiTransferEvaluator:
         best_combined_vorp = float("-inf")
 
         for t1 in single_transfers[:t1_candidates]:
-            # ── Simulate post-T1 squad ────────────────────────────────────────
-            post_t1_bank = round(bank + t1.sell.sell_price - t1.buy.cost, 2)
-            sim_players  = [
-                p for p in squad.players if p.element != t1.sell.element
-            ] + [t1.buy]
-            sim_squad = Squad(
-                players        = sim_players,
-                bank           = post_t1_bank,
-                free_transfers = free_transfers,
-                gameweek       = squad.gameweek,
+            sim_squad, post_t1_bank = self._simulate_post_t1(squad, t1, bank, free_transfers)
+            best_t2 = self._find_best_t2(
+                sim_squad, pool, validator, position_stats,
+                t1, bank, post_t1_bank, hit_cost_t2,
             )
-
-            # T1 sell player is excluded from T2 sell candidates
-            t2_sellable = [
-                p for p in validator.get_sellable_players(sim_squad)
-                if p.element != t1.sell.element
-            ]
-
-            best_t2: Optional[TransferOption] = None
-            best_t2_vorp = float("-inf")
-
-            for sell in t2_sellable:
-                same_pos_pool = [
-                    p for p in pool
-                    if p.position == sell.position
-                    and p.element != t1.buy.element  # already bought in T1
-                ]
-                buyable = validator.get_buyable_players(sim_squad, sell, same_pos_pool)
-
-                for buy in buyable:
-                    expected_gain = buy.expected_pts - sell.expected_pts
-                    if expected_gain <= hit_cost_t2:
-                        continue
-
-                    # VORP gain
-                    sell_vorp = VORPCalculator.get_player_vorp(sell, position_stats)
-                    buy_vorp  = position_stats.get(buy.position, {}).get(
-                        "vorp_scores", {}
-                    ).get(buy.element, 0.0)
-                    vorp_gain = round(buy_vorp - sell_vorp, 4)
-
-                    if vorp_gain <= best_t2_vorp:
-                        continue
-
-                    # Budget unlock: was this buy unaffordable before T1?
-                    effective_sell = sell.sell_price if sell.sell_price > 0 else sell.cost
-                    was_unaffordable = (bank + effective_sell) < buy.cost - 0.01
-                    now_affordable   = (post_t1_bank + effective_sell) >= buy.cost - 0.01
-                    budget_unlock    = was_unaffordable and now_affordable
-
-                    cost_delta     = round(buy.cost - sell.sell_price, 1)
-                    remaining_bank = round(post_t1_bank - cost_delta, 1)
-
-                    best_t2_vorp = vorp_gain
-                    best_t2 = TransferOption(
-                        sell                 = sell,
-                        buy                  = buy,
-                        cost_delta           = cost_delta,
-                        remaining_bank       = remaining_bank,
-                        point_gain_gw        = round(buy.predicted_pts - sell.predicted_pts, 3),
-                        expected_gain        = round(expected_gain, 3),
-                        fixture_gain         = round(
-                            buy.fixture_weighted_score - sell.fixture_weighted_score, 3
-                        ),
-                        form_gain            = round(buy.avg_pts_last5 - sell.avg_pts_last5, 3),
-                        transfer_cost_points = hit_cost_t2,
-                        net_expected_gain    = round(expected_gain - hit_cost_t2, 3),
-                        score                = vorp_gain,   # use vorp_gain as primary score
-                        sell_vorp_score      = sell_vorp,
-                        buy_vorp_score       = buy_vorp,
-                        vorp_gain            = vorp_gain,
-                        budget_unlock_flag   = budget_unlock,
-                        transfer_number      = 2,
-                        reasoning            = (
-                            f"T2 OUT: {sell.name} ({sell.position}, £{sell.sell_price}m sell) | "
-                            f"T2 IN: {buy.name} ({buy.position}, £{buy.cost}m) | "
-                            f"VORP gain: {vorp_gain:+.3f} | "
-                            f"Exp gain: {expected_gain:+.2f} pts | "
-                            f"Hit: {hit_cost_t2} pts"
-                            + (" | BUDGET UNLOCK" if budget_unlock else "")
-                        ),
-                    )
 
             if best_t2 is None:
                 continue
@@ -176,3 +99,123 @@ class MultiTransferEvaluator:
                 best_pair = (t1, best_t2)
 
         return best_pair
+
+    # ── Private helpers ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _simulate_post_t1(
+        squad: Squad,
+        t1: TransferOption,
+        bank: float,
+        free_transfers: int,
+    ) -> Tuple[Squad, float]:
+        """
+        Return the squad state and remaining bank after executing transfer T1.
+
+        T1's sell player is removed and T1's buy player is added.  The returned
+        squad is used as the starting point for all T2 candidate evaluation.
+        """
+        post_t1_bank = round(bank + t1.sell.sell_price - t1.buy.cost, 2)
+        sim_players = [
+            p for p in squad.players if p.element != t1.sell.element
+        ] + [t1.buy]
+        sim_squad = Squad(
+            players=sim_players,
+            bank=post_t1_bank,
+            free_transfers=free_transfers,
+            gameweek=squad.gameweek,
+        )
+        return sim_squad, post_t1_bank
+
+    @staticmethod
+    def _find_best_t2(
+        sim_squad: Squad,
+        pool: List[PlayerProfile],
+        validator: SquadValidator,
+        position_stats: Dict[str, dict],
+        t1: TransferOption,
+        bank: float,
+        post_t1_bank: float,
+        hit_cost_t2: float,
+    ) -> Optional[TransferOption]:
+        """
+        Find the best T2 transfer on the post-T1 squad.
+
+        Selection priority:
+          1. Highest vorp_gain (primary)
+          2. Lowest cost_delta (tiebreaker — cheaper transfer preferred)
+
+        T1's buy player is excluded from the T2 buy pool to prevent buying
+        the same player twice.  T1's sell player is already absent from
+        sim_squad so it cannot surface as a T2 sell candidate.
+        """
+        best_t2: Optional[TransferOption] = None
+        best_t2_vorp = float("-inf")
+
+        for sell in validator.get_sellable_players(sim_squad):
+            same_pos_pool = [
+                p for p in pool
+                if p.position == sell.position
+                and p.element != t1.buy.element  # already bought in T1
+            ]
+            buyable = validator.get_buyable_players(sim_squad, sell, same_pos_pool)
+
+            for buy in buyable:
+                expected_gain = buy.expected_pts - sell.expected_pts
+                if expected_gain <= hit_cost_t2:
+                    continue
+
+                sell_vorp = VORPCalculator.get_player_vorp(sell, position_stats)
+                buy_vorp = position_stats.get(buy.position, {}).get(
+                    "vorp_scores", {}
+                ).get(buy.element, 0.0)
+                vorp_gain = round(buy_vorp - sell_vorp, 4)
+                cost_delta = round(buy.cost - sell.sell_price, 1)
+
+                # Skip if this candidate is not better than the current best.
+                # Tiebreak on cost_delta ascending (cheaper transfer preferred).
+                if vorp_gain < best_t2_vorp or (
+                    vorp_gain == best_t2_vorp
+                    and best_t2 is not None
+                    and cost_delta >= best_t2.cost_delta
+                ):
+                    continue
+
+                effective_sell = sell.sell_price if sell.sell_price > 0 else sell.cost
+                was_unaffordable = (bank + effective_sell) < buy.cost - 0.01
+                now_affordable = (post_t1_bank + effective_sell) >= buy.cost - 0.01
+                budget_unlock = was_unaffordable and now_affordable
+
+                remaining_bank = round(post_t1_bank - cost_delta, 1)
+
+                best_t2_vorp = vorp_gain
+                best_t2 = TransferOption(
+                    sell=sell,
+                    buy=buy,
+                    cost_delta=cost_delta,
+                    remaining_bank=remaining_bank,
+                    point_gain_gw=round(buy.predicted_pts - sell.predicted_pts, 3),
+                    expected_gain=round(expected_gain, 3),
+                    fixture_gain=round(
+                        buy.fixture_weighted_score - sell.fixture_weighted_score, 3
+                    ),
+                    form_gain=round(buy.avg_pts_last5 - sell.avg_pts_last5, 3),
+                    transfer_cost_points=hit_cost_t2,
+                    net_expected_gain=round(expected_gain - hit_cost_t2, 3),
+                    score=vorp_gain,
+                    sell_vorp_score=sell_vorp,
+                    buy_vorp_score=buy_vorp,
+                    vorp_gain=vorp_gain,
+                    budget_unlock_flag=budget_unlock,
+                    transfer_number=2,
+                    reasoning=(
+                        f"T2 OUT: {sell.name} ({sell.position}, £{sell.sell_price}m sell) | "
+                        f"T2 IN: {buy.name} ({buy.position}, £{buy.cost}m) | "
+                        f"VORP gain: {vorp_gain:+.3f} | "
+                        f"Exp gain: {expected_gain:+.2f} pts | "
+                        f"Hit: {hit_cost_t2} pts"
+                        + (" | BUDGET UNLOCK" if budget_unlock else "")
+                    ),
+                )
+
+        return best_t2
