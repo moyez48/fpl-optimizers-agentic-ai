@@ -201,6 +201,7 @@ export function adaptToTransferOutput(apiResponse) {
         id:       t.buy?.element ?? i,
         name:     t.buy?.name ?? '—',
         position: t.buy?.position ?? '—',
+        team:     t.buy?.team ?? '—',
         price:    parseFloat((t.buy?.cost ?? 0).toFixed(1)),
         xPts:     parseFloat((t.buy?.expected_pts ?? 0).toFixed(1)),
       },
@@ -215,7 +216,59 @@ export function adaptToTransferOutput(apiResponse) {
     }
   }
 
-  const transfers = (apiResponse.transfers || []).map((t, i) => mapOne(t, i))
+  const normalizeTransfers = (apiResponse.transfers || []).map((t, i) => mapOne(t, i))
+  const groupedByOut = new Map()
+
+  const mergeTransfer = (candidate) => {
+    const outId = candidate?.out?.id
+    if (outId == null) return
+
+    const existing = groupedByOut.get(outId)
+    if (!existing) {
+      groupedByOut.set(outId, {
+        ...candidate,
+        alternatives: [...(candidate.alternatives || [])],
+      })
+      return
+    }
+
+    // Keep the stronger candidate as primary for this outgoing player.
+    const existingScore = existing.netGain ?? Number.NEGATIVE_INFINITY
+    const candidateScore = candidate.netGain ?? Number.NEGATIVE_INFINITY
+    const keepCandidatePrimary = candidateScore > existingScore
+
+    const primary = keepCandidatePrimary ? candidate : existing
+    const secondary = keepCandidatePrimary ? existing : candidate
+    const mergedAlternatives = [
+      ...(primary.alternatives || []),
+      secondary,
+      ...(secondary.alternatives || []),
+    ]
+
+    // Dedupe alternatives by incoming player and remove the primary incoming pick.
+    const seenIn = new Set([primary.in?.id])
+    const dedupedAlternatives = []
+    for (const alt of mergedAlternatives) {
+      const inId = alt?.in?.id
+      if (inId == null || seenIn.has(inId)) continue
+      seenIn.add(inId)
+      dedupedAlternatives.push({
+        ...alt,
+        alternatives: [],
+      })
+    }
+
+    groupedByOut.set(outId, {
+      ...primary,
+      alternatives: dedupedAlternatives,
+    })
+  }
+
+  for (const t of normalizeTransfers) {
+    mergeTransfer(t)
+  }
+
+  const transfers = [...groupedByOut.values()].sort((a, b) => (b.netGain ?? 0) - (a.netGain ?? 0))
 
   return {
     transfers,
