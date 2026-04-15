@@ -340,73 +340,75 @@ class SportingDirectorAgent:
                     ),
                 ))
 
-        # ── Group by sell player, apply 4-way tiebreaker within each group ──────
-        # For each player being sold, all valid buy candidates are ranked by:
-        #   1. expected_pts (predicted xP) — highest first
-        #   2. cost_delta                  — cheapest first
-        #   3. team_diversity              — prefer under-represented clubs
-        #   4. avg_pts_last5               — historical median proxy, highest first
-        # The #1 becomes the primary recommendation; #2 and #3 become alternatives.
-        squad_team_counts = squad.club_counts()
+        # ── Group all scored options by sell player ───────────────────────────
         by_sell: Dict[int, List[TransferOption]] = {}
         for opt in options:
             by_sell.setdefault(opt.sell.element, []).append(opt)
 
+        # ── Within each sell group: rank targets, assign primary + alternatives ──
+        # Tiebreaker order (per spec):
+        #   1. Highest predicted_xP  (buy.predicted_pts, descending)
+        #   2. Lowest price          (buy.cost, ascending)
+        #   3. Different team        (prefer teams ≠ sell player's team, ascending)
         primaries: List[TransferOption] = []
         for opts in by_sell.values():
-            ranked_group = self._rank_by_tiebreaker(opts, squad_team_counts)
-            primary = ranked_group[0]
-            primary.alternatives = ranked_group[1:3]
+            sell_team = opts[0].sell.team
+
+            ranked = sorted(
+                opts,
+                key=lambda o: (
+                    -o.buy.predicted_pts,               # 1. highest xP
+                    o.buy.cost,                         # 2. cheapest
+                    int(o.buy.team == sell_team),       # 3. different team preferred (0 < 1)
+                ),
+            )
+            primary = ranked[0]
+            primary.alternatives = ranked[1:3]          # #2 and #3 become alternatives
             primaries.append(primary)
 
-        # Overall ranking: sell players whose primary buy has highest vorp_gain first
+        # ── Overall sell-player ranking: highest VORP gain first ──────────────
         primaries.sort(key=lambda o: (-o.vorp_gain, o.cost_delta))
 
-        # Prevent the same player from being the primary buy in two sell groups
-        seen_buy: set = set()
+        # ── Global dedup: guarantee no (out_id, in_id) pair appears twice ─────
+        # Also prevent the same buy player being primary in two different sell groups.
+        seen_buy: set = set()        # primary buy elements claimed so far
+        global_pairs: set = set()   # all (sell, buy) pairs emitted (top-level + alts)
         top: List[TransferOption] = []
+
         for p in primaries:
-            if p.buy.element not in seen_buy:
-                seen_buy.add(p.buy.element)
-                top.append(p)
-                if len(top) >= self.top_n:
-                    break
+            primary_pair = (p.sell.element, p.buy.element)
+            # Skip if this buy player is already a primary elsewhere
+            if p.buy.element in seen_buy or primary_pair in global_pairs:
+                continue
+
+            seen_buy.add(p.buy.element)
+            global_pairs.add(primary_pair)
+
+            # Filter alternatives: skip any (sell, buy) pair already seen globally
+            clean_alts: List[TransferOption] = []
+            for alt in p.alternatives:
+                alt_pair = (alt.sell.element, alt.buy.element)
+                if alt_pair not in global_pairs:
+                    global_pairs.add(alt_pair)
+                    clean_alts.append(alt)
+            p.alternatives = clean_alts
+
+            top.append(p)
+            if len(top) >= self.top_n:
+                break
 
         log.append(
             f"[5] score_single_transfers: {len(options)} pairs passed gate; "
-            f"{len(primaries)} sell groups; top transfer = "
+            f"{len(primaries)} sell groups; top = "
             + (
                 f"{top[0].sell.name} → {top[0].buy.name} "
-                f"(vorp_gain {top[0].vorp_gain:+.3f}, exp_gain {top[0].expected_gain:+.2f}, "
-                f"{len(top[0].alternatives)} alternatives)"
+                f"(vorp {top[0].vorp_gain:+.3f}, xP {top[0].buy.predicted_pts:.1f}, "
+                f"{len(top[0].alternatives)} alt(s))"
                 if top else "none"
             )
         )
 
         return position_stats, top
-
-    @staticmethod
-    def _rank_by_tiebreaker(
-        options: List[TransferOption],
-        squad_team_counts: Dict[str, int],
-    ) -> List[TransferOption]:
-        """
-        Rank buy candidates for the same sell player using the 4-way tiebreaker.
-
-        Priority (all relative to the buy player):
-          1. expected_pts     — highest first (primary quality signal)
-          2. cost_delta       — lowest first  (cheapest upgrade preferred)
-          3. team_count       — lowest first  (prefer clubs under-represented in squad)
-          4. avg_pts_last5    — highest first (historical median points proxy)
-        """
-        def key(opt: TransferOption) -> tuple:
-            return (
-                -opt.buy.expected_pts,
-                opt.cost_delta,
-                squad_team_counts.get(opt.buy.team, 0),
-                -opt.buy.avg_pts_last5,
-            )
-        return sorted(options, key=key)
 
     def _node6_evaluate_multi_transfer(
         self,
@@ -495,20 +497,22 @@ class SportingDirectorAgent:
         Single and multi options are returned together; the Manager Agent
         chooses which to act on.
         """
+        # single_options is already grouped: one entry per sell player, with
+        # alternatives nested inside each primary. Start from that clean list.
         transfers: List[TransferOption] = list(single_options)
 
         if multi_pair:
             t1, t2 = multi_pair
-            # Insert the pair at the front if the combined vorp beats the best single
-            combined = t1.vorp_gain + t2.vorp_gain
+            combined        = t1.vorp_gain + t2.vorp_gain
             best_single_vorp = single_options[0].vorp_gain if single_options else float("-inf")
             if combined > best_single_vorp:
                 transfers = [t1, t2] + transfers
             else:
                 transfers = transfers + [t1, t2]
 
-        # Deduplicate by (sell, buy) pair — T1 of multi_pair is drawn from
-        # single_options so it would otherwise appear twice in the list
+        # Final dedup by (sell_element, buy_element) — T1 from multi_pair is
+        # drawn from single_options and would otherwise appear twice.
+        # Also catches any residual duplicates across paths.
         seen: set = set()
         deduped: List[TransferOption] = []
         for t in transfers:
