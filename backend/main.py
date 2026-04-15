@@ -772,21 +772,58 @@ def get_transfers(req: TransfersRequest):
     # stats pipeline row is GW `target_gw`; Sporting Director plans transfers for `next_gw`
     planning_gw = recommendation.gameweek
 
-    # Deduplicate transfer recommendations by (sell_element, buy_element) pair.
-    # The Sporting Director can emit the same pair via both single-transfer and
-    # multi-transfer paths; keep only the copy with the highest net_expected_gain.
     raw_transfers = rec_dict.get("recommended_transfers", [])
-    seen_pairs: dict[tuple, dict] = {}
+
+    # ── Step 1: deduplicate exact (player_out, player_in) pairs ──────────────
+    # The same pair can arrive via the single-transfer path AND the T1 of a
+    # multi-transfer pair. Keep the copy with the highest expected_gain (xP_gain).
+    pair_best: dict[tuple, dict] = {}
     for t in raw_transfers:
-        key = (
-            t.get("sell", {}).get("element"),
-            t.get("buy", {}).get("element"),
+        sell_elem = (t.get("sell") or {}).get("element")
+        buy_elem  = (t.get("buy")  or {}).get("element")
+        key  = (sell_elem, buy_elem)
+        gain = t.get("expected_gain") or 0
+        if key not in pair_best or gain > (pair_best[key].get("expected_gain") or 0):
+            pair_best[key] = t
+
+    # ── Step 2: group by player_out; #1 → Primary, rest → alternatives ───────
+    # Preserve the agent's sell-player ranking order (dict insertion is ordered).
+    by_sell: dict[int, list] = {}
+    for t in pair_best.values():
+        sell_elem = (t.get("sell") or {}).get("element")
+        by_sell.setdefault(sell_elem, []).append(t)
+
+    final_transfers: list[dict] = []
+    for group in by_sell.values():
+        # Within each sell group rank by expected_gain (xP_gain) descending
+        group.sort(key=lambda x: (x.get("expected_gain") or 0), reverse=True)
+
+        primary = dict(group[0])          # shallow copy — never mutate rec_dict
+        primary_buy = (primary.get("buy") or {}).get("element")
+
+        # Merge agent-provided alternatives with any extra same-sell top-level rows
+        agent_alts = list(primary.get("alternatives") or [])
+        extra_alts = group[1:]            # other buy targets as separate top-level rows
+
+        alt_seen: set = set()
+        merged_alts: list[dict] = []
+        for alt in extra_alts + agent_alts:
+            buy_elem = (alt.get("buy") or {}).get("element")
+            if buy_elem and buy_elem != primary_buy and buy_elem not in alt_seen:
+                alt_seen.add(buy_elem)
+                merged_alts.append(alt)
+
+        primary["alternatives"] = merged_alts[:2]
+        final_transfers.append(primary)
+
+    # Sort: free transfers first, then by expected_gain descending
+    final_transfers.sort(
+        key=lambda t: (
+            t.get("transfer_cost_points", 0) != 0,   # 0 (free) sorts before 4 (hit)
+            -(t.get("expected_gain") or 0),
         )
-        if key not in seen_pairs:
-            seen_pairs[key] = t
-        elif (t.get("net_expected_gain") or 0) > (seen_pairs[key].get("net_expected_gain") or 0):
-            seen_pairs[key] = t
-    deduped_transfers = list(seen_pairs.values())
+    )
+    deduped_transfers = final_transfers
 
     return _to_json({
         "gameweek":          target_gw,
