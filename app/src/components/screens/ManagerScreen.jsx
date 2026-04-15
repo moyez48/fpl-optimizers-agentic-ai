@@ -1,6 +1,105 @@
 import React, { useMemo, useState } from 'react'
 import { selectOptimalXI } from '../../utils/formations'
 
+// ── TransferCard ──────────────────────────────────────────────────────────────
+function TransferCard({ t }) {
+  const [showAlts, setShowAlts] = useState(false)
+  const hasAlts = t.alternatives?.length > 0
+
+  return (
+    <div className={`rounded-xl border p-4
+      ${t.isFreeTransfer ? 'bg-primary/5 border-primary/20' : t.netGain > 0 ? 'bg-amber/5 border-amber/20' : 'bg-card border-white/5 opacity-60'}`}>
+
+      {/* Header row */}
+      <div className="flex items-center justify-between mb-3">
+        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${t.isFreeTransfer ? 'bg-primary/20 text-primary' : 'bg-amber/20 text-amber'}`}>
+          {t.isFreeTransfer ? 'Free Transfer' : '-4 pt hit'}
+        </span>
+        <span className={`text-xs font-bold px-2 py-1 rounded-lg
+          ${t.priority === 'HIGH'   ? 'bg-primary/15 text-primary border border-primary/20' :
+            t.priority === 'MEDIUM' ? 'bg-amber/15 text-amber border border-amber/20' :
+            'bg-white/5 text-fpl_text/40 border border-white/10'}`}>
+          {t.priority} priority
+        </span>
+      </div>
+
+      {/* Primary recommendation: OUT → IN */}
+      <div className="flex items-center gap-2 mb-3">
+        <div className="flex-1 bg-danger/10 border border-danger/20 rounded-lg p-2.5">
+          <p className="text-[9px] text-danger/60 uppercase mb-0.5">OUT</p>
+          <p className="text-xs font-bold text-fpl_text">{t.out.name}</p>
+          <div className="flex justify-between mt-0.5">
+            <span className="text-[10px] text-fpl_text/40">{t.out.position}</span>
+            <span className="text-[10px] text-fpl_text/40">£{t.out.price}m</span>
+          </div>
+          <p className="text-[10px] text-danger mt-1">{t.out.xPts.toFixed(1)} xPts</p>
+        </div>
+        <span className="text-primary text-lg flex-shrink-0">→</span>
+        <div className="flex-1 bg-primary/10 border border-primary/20 rounded-lg p-2.5">
+          <p className="text-[9px] text-primary/60 uppercase mb-0.5">IN</p>
+          <p className="text-xs font-bold text-fpl_text">{t.in.name}</p>
+          <div className="flex justify-between mt-0.5">
+            <span className="text-[10px] text-fpl_text/40">{t.in.position}</span>
+            <span className="text-[10px] text-fpl_text/40">£{t.in.price}m</span>
+          </div>
+          <p className="text-[10px] text-primary mt-1">{t.in.xPts.toFixed(1)} xPts</p>
+        </div>
+      </div>
+
+      {/* Gain metrics */}
+      <div className="grid grid-cols-3 gap-2 mb-3">
+        <div className="bg-black/20 rounded-lg p-2 text-center">
+          <p className="text-[9px] text-fpl_text/30">xPts gain</p>
+          <p className="text-sm font-black text-primary">+{t.xPtsGain.toFixed(1)}</p>
+        </div>
+        <div className="bg-black/20 rounded-lg p-2 text-center">
+          <p className="text-[9px] text-fpl_text/30">Hit cost</p>
+          <p className={`text-sm font-black ${t.hitCost > 0 ? 'text-danger' : 'text-fpl_text/50'}`}>{t.hitCost > 0 ? `-${t.hitCost}` : '0'}</p>
+        </div>
+        <div className="bg-black/20 rounded-lg p-2 text-center">
+          <p className="text-[9px] text-fpl_text/30">Net gain</p>
+          <p className={`text-sm font-black ${t.netGain > 0 ? 'text-primary' : 'text-danger'}`}>{t.netGain > 0 ? '+' : ''}{t.netGain.toFixed(1)}</p>
+        </div>
+      </div>
+
+      {t.reasoning && <p className="text-[10px] text-fpl_text/40 mb-3 italic leading-relaxed">{t.reasoning}</p>}
+
+      {/* See Alternatives toggle */}
+      {hasAlts && (
+        <div>
+          <button
+            onClick={() => setShowAlts(v => !v)}
+            className="w-full flex items-center justify-between px-3 py-2 rounded-lg border border-white/10 bg-white/5 hover:border-white/20 hover:bg-white/8 transition-all text-[11px] font-semibold text-fpl_text/50 hover:text-fpl_text/70"
+          >
+            <span>See {showAlts ? 'fewer' : `${t.alternatives.length} alternative${t.alternatives.length > 1 ? 's' : ''}`}</span>
+            <span className={`transition-transform duration-200 ${showAlts ? 'rotate-180' : ''}`}>▾</span>
+          </button>
+
+          {showAlts && (
+            <div className="mt-2 flex flex-col gap-1.5">
+              {t.alternatives.map((alt, j) => (
+                <div key={alt.in.id ?? j} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-white/4 border border-white/8">
+                  <span className="text-[10px] font-black text-fpl_text/30 w-4 shrink-0">#{j + 2}</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold text-fpl_text truncate">{alt.in.name}</p>
+                    <p className="text-[10px] text-fpl_text/40">{alt.in.position} · £{alt.in.price}m</p>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <p className="text-xs font-black text-primary">{alt.in.xPts.toFixed(1)} xP</p>
+                    <p className={`text-[10px] font-semibold ${alt.netGain > 0 ? 'text-primary/60' : 'text-danger/60'}`}>
+                      {alt.netGain > 0 ? '+' : ''}{alt.netGain.toFixed(1)} net
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 const TABS = ['Optimal XI', 'Captain Picks', 'Transfers']
 
 const POS_STYLE = {
@@ -322,58 +421,7 @@ export default function ManagerScreen({ agentData = null, userInput = null }) {
               <p className="text-fpl_text/25 text-xs mt-1">Import your FPL team to get personalised transfer recommendations from the Sporting Director agent</p>
             </div>
           ) : (
-            transfers.map((t, i) => (
-              <div key={i} className={`rounded-xl border p-4
-                ${t.isFreeTransfer ? 'bg-primary/5 border-primary/20' : t.netGain > 0 ? 'bg-amber/5 border-amber/20' : 'bg-card border-white/5 opacity-60'}`}>
-                <div className="flex items-center justify-between mb-3">
-                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${t.isFreeTransfer ? 'bg-primary/20 text-primary' : 'bg-amber/20 text-amber'}`}>
-                    {t.isFreeTransfer ? 'Free Transfer' : '-4 pt hit'}
-                  </span>
-                  <span className={`text-xs font-bold px-2 py-1 rounded-lg
-                    ${t.priority === 'HIGH'   ? 'bg-primary/15 text-primary border border-primary/20' :
-                      t.priority === 'MEDIUM' ? 'bg-amber/15 text-amber border border-amber/20' :
-                      'bg-white/5 text-fpl_text/40 border border-white/10'}`}>
-                    {t.priority} priority
-                  </span>
-                </div>
-                <div className="flex items-center gap-2 mb-3">
-                  <div className="flex-1 bg-danger/10 border border-danger/20 rounded-lg p-2.5">
-                    <p className="text-[9px] text-danger/60 uppercase mb-0.5">OUT</p>
-                    <p className="text-xs font-bold text-fpl_text">{t.out.name}</p>
-                    <div className="flex justify-between mt-0.5">
-                      <span className="text-[10px] text-fpl_text/40">{t.out.position}</span>
-                      <span className="text-[10px] text-fpl_text/40">£{t.out.price}m</span>
-                    </div>
-                    <p className="text-[10px] text-danger mt-1">{t.out.xPts.toFixed(1)} xPts</p>
-                  </div>
-                  <span className="text-primary text-lg flex-shrink-0">→</span>
-                  <div className="flex-1 bg-primary/10 border border-primary/20 rounded-lg p-2.5">
-                    <p className="text-[9px] text-primary/60 uppercase mb-0.5">IN</p>
-                    <p className="text-xs font-bold text-fpl_text">{t.in.name}</p>
-                    <div className="flex justify-between mt-0.5">
-                      <span className="text-[10px] text-fpl_text/40">{t.in.position}</span>
-                      <span className="text-[10px] text-fpl_text/40">£{t.in.price}m</span>
-                    </div>
-                    <p className="text-[10px] text-primary mt-1">{t.in.xPts.toFixed(1)} xPts</p>
-                  </div>
-                </div>
-                <div className="grid grid-cols-3 gap-2">
-                  <div className="bg-black/20 rounded-lg p-2 text-center">
-                    <p className="text-[9px] text-fpl_text/30">xPts gain</p>
-                    <p className="text-sm font-black text-primary">+{t.xPtsGain.toFixed(1)}</p>
-                  </div>
-                  <div className="bg-black/20 rounded-lg p-2 text-center">
-                    <p className="text-[9px] text-fpl_text/30">Hit cost</p>
-                    <p className={`text-sm font-black ${t.hitCost > 0 ? 'text-danger' : 'text-fpl_text/50'}`}>{t.hitCost > 0 ? `-${t.hitCost}` : '0'}</p>
-                  </div>
-                  <div className="bg-black/20 rounded-lg p-2 text-center">
-                    <p className="text-[9px] text-fpl_text/30">Net gain</p>
-                    <p className={`text-sm font-black ${t.netGain > 0 ? 'text-primary' : 'text-danger'}`}>{t.netGain > 0 ? '+' : ''}{t.netGain.toFixed(1)}</p>
-                  </div>
-                </div>
-                {t.reasoning && <p className="text-[10px] text-fpl_text/40 mt-2 italic leading-relaxed">{t.reasoning}</p>}
-              </div>
-            ))
+            transfers.map((t, i) => <TransferCard key={t.out.id ?? i} t={t} />)
           )}
         </div>
       )}

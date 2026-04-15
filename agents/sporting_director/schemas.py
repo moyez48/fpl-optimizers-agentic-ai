@@ -230,6 +230,11 @@ class TransferOption:
     # Human-readable summary
     reasoning: str = ""
 
+    # Alternative buy targets for the same sell player, ranked by the
+    # 4-way tiebreaker (xP → cost → team_diversity → historical pts).
+    # Populated by Node 5; empty for T2 multi-transfer options.
+    alternatives: List[TransferOption] = field(default_factory=list)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SQUAD HEALTH

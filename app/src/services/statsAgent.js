@@ -183,7 +183,7 @@ export async function fetchTransfers({ playerIds, bank = 0, freeTransfers = 1, g
  * Transform the raw transfers response into the shape ManagerScreen expects.
  */
 export function adaptToTransferOutput(apiResponse) {
-  const transfers = (apiResponse.transfers || []).map((t, i) => {
+  const mapOne = (t, i) => {
     const isFree = t.transfer_cost_points === 0
     const netGain = parseFloat((t.net_expected_gain ?? 0).toFixed(1))
     const score = t.score ?? 0
@@ -210,8 +210,12 @@ export function adaptToTransferOutput(apiResponse) {
       isFreeTransfer:  isFree,
       priority,
       reasoning:       t.reasoning ?? '',
+      // Alternative buy targets for the same sell player (#2 and #3 by tiebreaker)
+      alternatives:    (t.alternatives ?? []).map((alt) => mapOne(alt, i)),
     }
-  })
+  }
+
+  const transfers = (apiResponse.transfers || []).map((t, i) => mapOne(t, i))
 
   return {
     transfers,
