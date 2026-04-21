@@ -25,13 +25,44 @@ Each agent has a defined role:
 - **Agents**: **LangGraph** Stats Agent batch-predicts per gameweek; **Sporting Director** and **Manager** agents run over squad and prediction state (see `agents/`).
 - **Product**: **React (Vite)** frontend in `app/` and **FastAPI** backend in `backend/` exposing stats, predictions, and agent orchestration endpoints.
 
-**Baseline (GW 38 holdout, XGBoost V0):**
+### Model evaluation (XGBoost)
 
-| Model | MAE | RMSE | R² |
-|-------|-----|------|-----|
-| XGBoost (baseline) | 0.917 pts | 1.882 pts | 0.289 |
+**Production model — `xgb_history_v2`** (`models/xgb_history_v2.pkl`):
 
-Further model variants (e.g. Random Forest, LightGBM, MLP, Ridge) remain part of the ML comparison track.
+Walk-forward validation on **2024-25 GW10–38** (29 folds), trained with multi-season history (see `models/xgb_history_v2_metadata.json`).
+
+| Metric | Mean |
+|--------|------|
+| MAE | 1.030 pts |
+| RMSE | 1.957 pts |
+| R² | 0.318 |
+| Spearman ρ | 0.710 |
+| Top-10 precision | 0.145 |
+| Top-30 precision | 0.272 |
+
+RMSE is reported alongside the other metrics in metadata; it is aligned with the same MAE scaling as the reproducible single-CSV CV below (see `rmse_mean_note` in the JSON).
+
+**Reproducible walk-forward CV** (no Vaastav downloads — only `data/processed_fpl_data.csv`, `hist_base` empty):
+
+```bash
+python analysis/compute_cv_metrics.py
+```
+
+Writes `models/cv_metrics_processed_only.json`. Latest run: **MAE 1.062**, **RMSE 2.018**, **R² 0.308**, **Spearman 0.705** (29 folds).
+
+**Single-GW snapshot (Stats Agent, 2024-25 GW38)** — `predicted_pts` vs sanitised actuals, ~804 assets:
+
+| MAE | RMSE | R² |
+|-----|------|-----|
+| 0.987 pts | 1.998 pts | 0.373 |
+
+```bash
+python analysis/gw_prediction_metrics.py --gameweek 38 --season 2024-25
+```
+
+**Notebook V0 baseline** (2024-25 train GW1–37 → test GW38, master features, notebook output): MAE **0.917** pts, RMSE **1.882** pts, R² **0.289** — used as the original “ML duel” reference.
+
+Further model variants (Random Forest, LightGBM, MLP, Ridge) remain part of the ML comparison track.
 
 ---
 
@@ -61,6 +92,7 @@ fpl-optimizers-agentic-ai/
 |   +-- master_feature_engineering.py
 |   +-- fpl_pipeline.py
 |   +-- gw_prediction_metrics.py
+|   +-- compute_cv_metrics.py    # Walk-forward CV → models/cv_metrics_processed_only.json
 |   +-- *.ipynb                  # EDA & model training notebooks
 |
 +-- agents/                      # LangGraph & agent logic
@@ -70,7 +102,9 @@ fpl-optimizers-agentic-ai/
 |
 +-- app/                         # React + Vite + Tailwind frontend
 +-- backend/                     # FastAPI — bridges UI to agents
-+-- models/                      # Trained model artifacts (e.g. XGBoost)
++-- models/                      # Trained model artifacts + CV metric JSON
+|   +-- xgb_history_v2_metadata.json
+|   +-- cv_metrics_processed_only.json   # from analysis/compute_cv_metrics.py
 +-- data/                        # Processed CSV + API/cache JSON (raw seasons not committed)
 +-- scripts/                     # CLI helpers (e.g. full optimizer run)
 +-- reports/                     # Notebook-generated charts

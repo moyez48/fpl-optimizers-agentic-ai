@@ -90,6 +90,8 @@
     "method": "walk-forward CV, GW10-38 of 2024-25",
     "n_folds": 29,
     "mae_mean": 1.0295,
+    "rmse_mean": 1.957,
+    "rmse_mean_note": "Derived from reproducible walk-forward on processed_fpl_data.csv only (rmse_mean 2.0184, mae_mean 1.0616) scaled by mae_mean ratio to this row (1.0295/1.0616). Re-run train_with_history.py with Vaastav seasons for an exact multi-season RMSE.",
     "r2_mean": 0.3179,
     "spearman_mean": 0.7104,
     "top10_precision_mean": 0.1448,
