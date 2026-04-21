@@ -1,11 +1,18 @@
 {
   "description": "Walk-forward CV on 2024-25 GW10-38, processed_fpl_data.csv only (no Vaastav seasons).",
+  "test_season": "2024-25",
+  "prior_season": null,
+  "gw_range": [
+    10,
+    38
+  ],
   "n_folds": 29,
   "method": "Same XGBoost params as train_with_history; hist_base empty.",
-  "mae_mean": 1.0616,
-  "rmse_mean": 2.0184,
-  "r2_mean": 0.3083,
-  "spearman_mean": 0.7048,
-  "top10_precision_mean": 0.169,
-  "top30_precision_mean": 0.2908
+  "mae_mean": 1.0625,
+  "rmse_mean": 2.0297,
+  "r2_mean": 0.3043,
+  "spearman_mean": 0.7029,
+  "top10_precision_mean": 0.1759,
+  "top30_precision_mean": 0.3046,
+  "skipped_gameweeks": []
 }

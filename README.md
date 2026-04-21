@@ -48,7 +48,24 @@ RMSE is reported alongside the other metrics in metadata; it is aligned with the
 python analysis/compute_cv_metrics.py
 ```
 
-Writes `models/cv_metrics_processed_only.json`. Latest run: **MAE 1.062**, **RMSE 2.018**, **R² 0.308**, **Spearman 0.705** (29 folds).
+Writes `models/cv_metrics_processed_only.json`. Latest run: **MAE 1.063**, **RMSE 2.030**, **R² 0.304**, **Spearman 0.703** (29 folds, 2024-25 GW10–38).
+
+**2025-26 season — walk-forward on GW1–30 request** (processed CSV only; train = all **2024-25** + **2025-26** rows with GW &lt; test GW):
+
+```bash
+python analysis/compute_cv_metrics.py --test-season 2025-26 --gw-min 1 --gw-max 30 --prior-season 2024-25
+```
+
+Writes `models/cv_metrics_2025-26_gw1_30.json`. Latest run (means over **29 folds: GW2–30**; **GW1** has no test rows that pass the same feature `dropna` gate as later weeks, so it is omitted):
+
+| Metric | Mean |
+|--------|------|
+| MAE | 0.981 pts |
+| RMSE | 1.936 pts |
+| R² | 0.329 |
+| Spearman ρ | 0.724 |
+| Top-10 precision | 0.100 |
+| Top-30 precision | 0.200 |
 
 **Single-GW snapshot (Stats Agent, 2024-25 GW38)** — `predicted_pts` vs sanitised actuals, ~804 assets:
 
@@ -92,7 +109,7 @@ fpl-optimizers-agentic-ai/
 |   +-- master_feature_engineering.py
 |   +-- fpl_pipeline.py
 |   +-- gw_prediction_metrics.py
-|   +-- compute_cv_metrics.py    # Walk-forward CV → models/cv_metrics_processed_only.json
+|   +-- compute_cv_metrics.py    # Walk-forward CV → models/cv_metrics_*.json
 |   +-- *.ipynb                  # EDA & model training notebooks
 |
 +-- agents/                      # LangGraph & agent logic
@@ -104,7 +121,8 @@ fpl-optimizers-agentic-ai/
 +-- backend/                     # FastAPI — bridges UI to agents
 +-- models/                      # Trained model artifacts + CV metric JSON
 |   +-- xgb_history_v2_metadata.json
-|   +-- cv_metrics_processed_only.json   # from analysis/compute_cv_metrics.py
+|   +-- cv_metrics_processed_only.json
+|   +-- cv_metrics_2025-26_gw1_30.json     # 2025-26 GW2–30 walk-forward (see README)
 +-- data/                        # Processed CSV + API/cache JSON (raw seasons not committed)
 +-- scripts/                     # CLI helpers (e.g. full optimizer run)
 +-- reports/                     # Notebook-generated charts

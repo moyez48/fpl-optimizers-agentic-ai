@@ -1,17 +1,16 @@
 """
-Reproducible walk-forward CV on 2024-25 GW10-38 using only data/processed_fpl_data.csv.
+Reproducible walk-forward CV using data/processed_fpl_data.csv (no Vaastav downloads).
 
-Uses the same feature list and XGBoost hyperparameters as train_with_history.py, but with
-no external Vaastav seasons (hist_base is empty). Mean metrics approximate a single-season
-validation; the deployed xgb_history_v2 model was trained with additional historical seasons
-— see models/xgb_history_v2_metadata.json for that run.
+Uses the same feature list and XGBoost hyperparameters as train_with_history.py.
 
 Usage (repo root):
   python analysis/compute_cv_metrics.py
+  python analysis/compute_cv_metrics.py --test-season 2025-26 --gw-min 1 --gw-max 30 --prior-season 2024-25
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -30,7 +29,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 PROCESSED = os.path.join(ROOT, "data", "processed_fpl_data.csv")
-META_OUT = os.path.join(ROOT, "models", "cv_metrics_processed_only.json")
+DEFAULT_META_OUT = os.path.join(ROOT, "models", "cv_metrics_processed_only.json")
 
 XGB_PARAMS = dict(
     n_estimators=500,
@@ -149,53 +148,38 @@ def build_feature_matrix(combined: pd.DataFrame) -> tuple[pd.DataFrame, list[str
     return combined, features
 
 
-def main() -> None:
-    np.random.seed(42)
-
-    if not os.path.isfile(PROCESSED):
-        print(f"Missing {PROCESSED}")
-        sys.exit(1)
-
-    print("Loading processed_fpl_data.csv …")
-    raw = pd.read_csv(PROCESSED)
-    # Drop columns that MasterFE recomputes (avoids merge suffix conflicts on dirty CSVs).
-    _drop_opp = [
-        c
-        for c in raw.columns
-        if c == "opponent_strength"
-        or c.startswith("opponent_xGC_last_")
-    ]
-    if _drop_opp:
-        raw = raw.drop(columns=_drop_opp)
-    combined, FEATURES = build_feature_matrix(raw)
-    # Some optional columns (e.g. starts_per_90) can be all-NaN for 2024-25 when no hist seasons.
-    s24 = combined["season"] == "2024-25"
-    FEATURES = [f for f in FEATURES if combined.loc[s24, f].notna().any()]
-    print(f"Rows: {len(combined):,}  Features: {len(FEATURES)}")
-
+def run_walkforward(
+    combined: pd.DataFrame,
+    FEATURES: list[str],
+    *,
+    test_season: str,
+    test_gws: list[int],
+    prior_season: str | None,
+) -> list[dict]:
+    """One fold per test_gw. If prior_season is set, train = prior season (all GWs) + test_season GW < test_gw."""
     hist_base = combined.iloc[0:0].copy()
-    test_season = "2024-25"
-    test_gws = list(range(10, 39))
-
-    results = []
-    topk_rows = []
-
-    print(f"\nWalk-forward CV: {test_season} GW {test_gws[0]}–{test_gws[-1]} (hist_base empty)")
+    results: list[dict] = []
 
     for test_gw in test_gws:
-        cur_train = combined[
-            (combined["season"] == test_season) & (combined["GW"] < test_gw)
-        ].dropna(subset=FEATURES + ["total_points"])
+        if prior_season:
+            prior_train = combined[(combined["season"] == prior_season)].dropna(
+                subset=FEATURES + ["total_points"]
+            )
+            cur_train = combined[
+                (combined["season"] == test_season) & (combined["GW"] < test_gw)
+            ].dropna(subset=FEATURES + ["total_points"])
+            train_df = pd.concat([prior_train, cur_train], ignore_index=True)
+        else:
+            cur_train = combined[
+                (combined["season"] == test_season) & (combined["GW"] < test_gw)
+            ].dropna(subset=FEATURES + ["total_points"])
+            train_df = pd.concat([hist_base, cur_train], ignore_index=True)
 
         test_df = combined[
             (combined["season"] == test_season) & (combined["GW"] == test_gw)
         ].dropna(subset=FEATURES + ["total_points"]).copy()
 
-        if test_df.empty:
-            continue
-
-        train_df = pd.concat([hist_base, cur_train], ignore_index=True)
-        if train_df.empty:
+        if test_df.empty or train_df.empty:
             continue
 
         split = int(len(train_df) * 0.9)
@@ -212,14 +196,13 @@ def main() -> None:
         r2 = r2_score(test_df["total_points"], preds)
         sp = spearmanr(test_df["total_points"], preds).statistic
 
-        topk = {}
+        topk: dict[int, float] = {}
         test_df = test_df.copy()
         test_df["pred"] = preds
         for k in [5, 10, 15, 20, 30]:
             top_pred = set(test_df.nlargest(k, "pred").index)
             top_actual = set(test_df.nlargest(k, "total_points").index)
             topk[k] = len(top_pred & top_actual) / k
-        topk_rows.append(topk)
 
         results.append(
             {
@@ -232,9 +215,132 @@ def main() -> None:
             }
         )
 
+    return results
+
+
+def main() -> None:
+    np.random.seed(42)
+
+    ap = argparse.ArgumentParser(description="Walk-forward XGBoost CV on processed_fpl_data.csv")
+    ap.add_argument("--test-season", default="2024-25", help="Season to score (e.g. 2025-26)")
+    ap.add_argument("--gw-min", type=int, default=10, help="First test GW (inclusive)")
+    ap.add_argument("--gw-max", type=int, default=38, help="Last test GW (inclusive)")
+    ap.add_argument(
+        "--prior-season",
+        default=None,
+        help="If set, training includes all rows from this season plus earlier GWs in test-season. "
+        "Use 2024-25 when evaluating 2025-26.",
+    )
+    ap.add_argument(
+        "--output",
+        default=None,
+        help="JSON path (default: models/cv_metrics_processed_only.json or "
+        "models/cv_metrics_<season>_gw<min>_<max>.json)",
+    )
+    args = ap.parse_args()
+
+    if not os.path.isfile(PROCESSED):
+        print(f"Missing {PROCESSED}")
+        sys.exit(1)
+
+    test_gws = list(range(args.gw_min, args.gw_max + 1))
+    prior_season = args.prior_season
+    test_season = args.test_season
+
+    if args.output:
+        meta_out = args.output
+    elif test_season == "2024-25" and args.gw_min == 10 and args.gw_max == 38 and prior_season is None:
+        meta_out = DEFAULT_META_OUT
+    else:
+        safe = test_season.replace("/", "-")
+        meta_out = os.path.join(ROOT, "models", f"cv_metrics_{safe}_gw{args.gw_min}_{args.gw_max}.json")
+
+    print("Loading processed_fpl_data.csv …")
+    raw = pd.read_csv(PROCESSED)
+    # Drop columns that MasterFE recomputes (avoids merge suffix conflicts on dirty CSVs).
+    _drop_opp = [
+        c
+        for c in raw.columns
+        if c == "opponent_strength"
+        or c.startswith("opponent_xGC_last_")
+    ]
+    if _drop_opp:
+        raw = raw.drop(columns=_drop_opp)
+    # Processed CSV may contain stale all-NaN rolling columns for 2025-26; drop so
+    # train_with_history.add_base_rolling_features recomputes them within (name, season).
+    _stale_roll: list[str] = []
+    for col, windows in [
+        ("total_points", [3, 5, 10]),
+        ("minutes", [3, 5]),
+        ("ict_index", [3, 5]),
+        ("creativity", [3, 5]),
+        ("threat", [3, 5]),
+        ("influence", [3, 5]),
+        ("bps", [3, 5]),
+        ("bonus", [3]),
+        ("clean_sheets", [3, 5]),
+    ]:
+        if col not in raw.columns:
+            continue
+        for w in windows:
+            c = f"{col}_last_{w}_avg"
+            if c in raw.columns:
+                _stale_roll.append(c)
+    for c in ("season_avg_points", "points_std_last_5"):
+        if c in raw.columns:
+            _stale_roll.append(c)
+    if _stale_roll:
+        raw = raw.drop(columns=list(dict.fromkeys(_stale_roll)))
+
+    from train_with_history import add_base_rolling_features
+
+    raw = add_base_rolling_features(raw)
+
+    combined, FEATURES = build_feature_matrix(raw)
+    # Drop features that are entirely NaN on rows used for this evaluation.
+    if prior_season:
+        mask_train = (combined["season"] == prior_season) | (
+            (combined["season"] == test_season) & (combined["GW"] <= args.gw_max)
+        )
+        mask_test = (
+            (combined["season"] == test_season)
+            & (combined["GW"] >= args.gw_min)
+            & (combined["GW"] <= args.gw_max)
+        )
+        # Require both training coverage and non-null on test GWs (e.g. xP rolls can
+        # be valid for 2024-25 but all-NaN for early 2025-26 if pipeline never fills xP).
+        FEATURES = [
+            f
+            for f in FEATURES
+            if combined.loc[mask_train, f].notna().any()
+            and combined.loc[mask_test, f].notna().any()
+        ]
+    else:
+        mask_feat = combined["season"] == test_season
+        FEATURES = [f for f in FEATURES if combined.loc[mask_feat, f].notna().any()]
+    print(f"Rows: {len(combined):,}  Features: {len(FEATURES)}")
+
+    print(
+        f"\nWalk-forward CV: test {test_season} GW {test_gws[0]}–{test_gws[-1]} "
+        f"({'train = prior ' + prior_season + ' + ' + test_season + ' GW<t' if prior_season else 'hist_base empty'})"
+    )
+
+    results = run_walkforward(
+        combined,
+        FEATURES,
+        test_season=test_season,
+        test_gws=test_gws,
+        prior_season=prior_season,
+    )
+
     if not results:
         print("No CV folds produced.")
         sys.exit(1)
+
+    ran_gws = {r["gw"] for r in results}
+    skipped_gws = [gw for gw in test_gws if gw not in ran_gws]
+    if skipped_gws:
+        print(f"Note: skipped gameweeks (empty train or test after dropna): {skipped_gws}")
 
     avg_mae = float(np.mean([r["mae"] for r in results]))
     avg_rmse = float(np.mean([r["rmse"] for r in results]))
@@ -257,22 +363,44 @@ def main() -> None:
     print(f"  Top-10 prec  {avg_t10:.4f}")
     print(f"  Top-30 prec  {avg_t30:.4f}")
 
+    if prior_season:
+        desc = (
+            f"Walk-forward CV on {test_season} GW{args.gw_min}-{args.gw_max}; "
+            f"train = all {prior_season} + {test_season} GW < test GW. processed_fpl_data.csv only."
+        )
+        method = (
+            f"Same XGBoost params as train_with_history; prior_season={prior_season}."
+        )
+    else:
+        desc = (
+            f"Walk-forward CV on {test_season} GW{args.gw_min}-{args.gw_max}, "
+            "processed_fpl_data.csv only (no Vaastav seasons)."
+        )
+        method = "Same XGBoost params as train_with_history; hist_base empty."
+
     payload = {
-        "description": "Walk-forward CV on 2024-25 GW10-38, processed_fpl_data.csv only (no Vaastav seasons).",
+        "description": desc,
+        "test_season": test_season,
+        "prior_season": prior_season,
+        "gw_range": [args.gw_min, args.gw_max],
         "n_folds": len(results),
-        "method": "Same XGBoost params as train_with_history; hist_base empty.",
+        "method": method,
         "mae_mean": round(avg_mae, 4),
         "rmse_mean": round(avg_rmse, 4),
         "r2_mean": round(avg_r2, 4),
         "spearman_mean": round(avg_sp, 4),
         "top10_precision_mean": round(avg_t10, 4),
         "top30_precision_mean": round(avg_t30, 4),
+        "skipped_gameweeks": skipped_gws,
+        "per_gw": results,
     }
+    if meta_out == DEFAULT_META_OUT:
+        payload.pop("per_gw", None)
 
-    os.makedirs(os.path.dirname(META_OUT), exist_ok=True)
-    with open(META_OUT, "w", encoding="utf-8") as f:
+    os.makedirs(os.path.dirname(meta_out), exist_ok=True)
+    with open(meta_out, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
-    print(f"\nWrote {META_OUT}")
+    print(f"\nWrote {meta_out}")
 
 
 if __name__ == "__main__":
