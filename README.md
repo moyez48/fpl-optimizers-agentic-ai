@@ -1,229 +1,220 @@
-﻿# FPL Optimizer - Agentic AI Edition
+# FPL Optimizer
 
-> **A multi-agent AI system for the 2025-26 Fantasy Premier League season.**  
-> Built by a team of 5 developers across 9 structured weeks, progressing from statistical modelling through autonomous agents to a deployed product.
+An end-to-end Fantasy Premier League optimizer built as a **3-agent LangGraph pipeline** on top of an **XGBoost points predictor**. Give it your FPL team ID — it pulls your live squad, projects every player's next-GW score, picks the optimal Starting XI + captain, and ranks single- and multi-transfer options under the real FPL price-lock and budget rules.
 
----
-
-## Project Vision
-
-The FPL Optimizer is not a static prediction tool. The end goal is a **network of specialised AI agents** that autonomously reason about transfers, captaincy, squad selection, and fixture difficulty, informed by live data and a continuously improving ML backbone.
-
-Each agent has a defined role:
-
-| Agent | Responsibility |
-|-------|----------------|
-| **Statistician** | Predicts GW points using XGBoost and feature-engineered historical data (LangGraph pipeline) |
-| **Sporting Director** | Evaluates transfer options against budget, squad constraints, and fixture outlook |
-| **Manager** | Selects captaincy and armband logic from predictions and squad context |
+Trained on six seasons of historical data (94,975 player-GW rows). Walk-forward CV across GW10–38 of 2024-25: **MAE 1.03, Spearman 0.71, Top-30 precision 27%**.
 
 ---
 
-## Current Status
+## Components
 
-- **ML & data**: Ingestion, cleaning, feature engineering, and baseline **XGBoost** training on a GW 38 holdout; optional **history-aware** training (`train_with_history.py`) and serialized models under `models/`.
-- **Agents**: **LangGraph** Stats Agent batch-predicts per gameweek; **Sporting Director** and **Manager** agents run over squad and prediction state (see `agents/`).
-- **Product**: **React (Vite)** frontend in `app/` and **FastAPI** backend in `backend/` exposing stats, predictions, and agent orchestration endpoints.
+| Component | Status | Where |
+|---|---|---|
+| Stats Agent (8-node LangGraph) | wired | `agents/stats_agent/` |
+| Sporting Director (8-node pipeline + LangGraph node) | wired | `agents/sporting_director/` |
+| Manager Agent (6-node LangGraph) | wired | `agents/manager_agent.py` |
+| XGBoost predictor | trained | `models/xgb_history_v2.pkl` |
+| FastAPI backend | running | `backend/main.py` |
+| React + Vite frontend | running | `app/` |
+| Weekly data refresh | scheduled | `update_data.py` + GitHub Action |
 
-### Model evaluation (XGBoost)
+The system runs end-to-end today. The remaining open work is **empirical calibration** of placeholder thresholds inside the agents (VORP replacement percentile, rotation/volatility flag triggers, wildcard trigger) — see the per-agent specs.
 
-**Production model — `xgb_history_v2`** (`models/xgb_history_v2.pkl`):
+---
 
-Walk-forward validation on **2024-25 GW10–38** (29 folds), trained with multi-season history (see `models/xgb_history_v2_metadata.json`).
+## Architecture
 
-| Metric | Mean |
-|--------|------|
-| MAE | 1.030 pts |
-| RMSE | 1.957 pts |
-| R² | 0.318 |
-| Spearman ρ | 0.710 |
-| Top-10 precision | 0.145 |
-| Top-30 precision | 0.272 |
+```
+┌─────────────────────────────────────────────┐
+│  FPL bootstrap-static API + 6-season CSVs   │
+└────────────────────┬────────────────────────┘
+                     │
+                     ▼
+            ┌──────────────────┐
+            │   Stats Agent    │   8-node LangGraph
+            │   (XGBoost xP)   │   batch over ~800 players
+            └────────┬─────────┘
+                     │  ranked players + form_stats + bootstrap
+         ┌───────────┴───────────┐
+         ▼                       ▼
+┌─────────────────┐     ┌──────────────────┐
+│ Sporting        │     │ Manager Agent    │
+│ Director        │     │                  │
+│ (transfers, $)  │     │ (XI, captain,    │
+│                 │     │  bench, chips)   │
+└────────┬────────┘     └─────────┬────────┘
+         │                        │
+         │  squad_health,         │  starting_xi, captain,
+         │  recommended_transfers │  bench, chip_recommendation
+         └───────────┬────────────┘
+                     ▼
+            ┌──────────────────┐
+            │  FastAPI server  │  /api/stats, /api/predict
+            │      ▲           │  caches Stats output per (season, GW)
+            │      │           │
+            │  React + Vite    │  player cards, agent-progress UI,
+            │  frontend        │  CSV/JSON export
+            └──────────────────┘
+```
 
-RMSE is reported alongside the other metrics in metadata; it is aligned with the same MAE scaling as the reproducible single-CSV CV below (see `rmse_mean_note` in the JSON).
+**Why three agents?** Splits are by **decision domain, not data flow**: Stats predicts and never decides; Sporting Director owns money and the 15-player squad; Manager owns the 11-player XI, captain, and chip activation. Each agent owns its own slice of the shared `FPLOptimizerState`, so any of them can be replaced or tested in isolation without touching the others. The LangGraph node-with-error-exit pattern means a failure inside one agent surfaces cleanly without corrupting downstream state.
 
-**Reproducible walk-forward CV** (no Vaastav downloads — only `data/processed_fpl_data.csv`, `hist_base` empty):
+**Calibration TODO.** Several agent thresholds are placeholders awaiting empirical tuning — `vorp_replacement_pct`, `rotation_risk` minutes/start-prob cutoffs, `form_declining` and `high_volatility` deltas, the wildcard 5-player / 2-flag trigger, and the chip-floor constants in the Manager. The specs in `agents/` flag each one explicitly.
+
+---
+
+## Model performance
+
+XGBoost regressor on 51 engineered features (form, minutes, xG/xA, ICT, fixture difficulty, transfer momentum, position dummies, interaction terms). Walk-forward cross-validation: for each test gameweek, the model is **re-trained from scratch** on all prior data — no future leakage.
+
+| CV slice | Folds | MAE | RMSE | R² | Spearman | Top-10 | Top-30 |
+|---|---|---|---|---|---|---|---|
+| 2024-25 GW10–38 (multi-season train) | 29 | 1.03 | 1.96 | 0.32 | 0.71 | 14% | 27% |
+| 2025-26 GW1–30 (processed-only) | 29 | 0.98 | 1.94 | 0.33 | 0.72 | 10% | 20% |
+
+Plots produced by the training run live in `reports/`:
+
+- `feature_importance.png` — top features by gain
+- `learning_curve.png` — train / val MAE vs. boosting rounds
+- `gw38_predicted_vs_actual.png` — calibration scatter on the final test GW
+- `top20_gw38.png` — projected vs. actual top-20 for GW38
+
+Reproduce the metrics yourself:
 
 ```bash
+# Multi-season retrain + walk-forward CV (writes models/xgb_history_v2.{pkl,json})
+python train_with_history.py
+
+# Single-CSV walk-forward CV (no Vaastav downloads required)
 python analysis/compute_cv_metrics.py
-```
 
-Writes `models/cv_metrics_processed_only.json`. Latest run: **MAE 1.063**, **RMSE 2.030**, **R² 0.304**, **Spearman 0.703** (29 folds, 2024-25 GW10–38).
-
-**2025-26 season — walk-forward on GW1–30 request** (processed CSV only; train = all **2024-25** + **2025-26** rows with GW &lt; test GW):
-
-```bash
+# 2025-26 GW1–30 walk-forward
 python analysis/compute_cv_metrics.py --test-season 2025-26 --gw-min 1 --gw-max 30 --prior-season 2024-25
-```
 
-Writes `models/cv_metrics_2025-26_gw1_30.json`. Latest run (means over **29 folds: GW2–30**; **GW1** has no test rows that pass the same feature `dropna` gate as later weeks, so it is omitted):
-
-| Metric | Mean |
-|--------|------|
-| MAE | 0.981 pts |
-| RMSE | 1.936 pts |
-| R² | 0.329 |
-| Spearman ρ | 0.724 |
-| Top-10 precision | 0.100 |
-| Top-30 precision | 0.200 |
-
-**Single-GW snapshot (Stats Agent, 2024-25 GW38)** — `predicted_pts` vs sanitised actuals, ~804 assets:
-
-| MAE | RMSE | R² |
-|-----|------|-----|
-| 0.987 pts | 1.998 pts | 0.373 |
-
-```bash
+# Single-GW snapshot from the Stats Agent's predicted_pts vs. actuals
 python analysis/gw_prediction_metrics.py --gameweek 38 --season 2024-25
 ```
 
-**Notebook V0 baseline** (2024-25 train GW1–37 → test GW38, master features, notebook output): MAE **0.917** pts, RMSE **1.882** pts, R² **0.289** — used as the original “ML duel” reference.
-
-Further model variants (Random Forest, LightGBM, MLP, Ridge) remain part of the ML comparison track.
+Full training metadata (features, hyperparameters, per-GW metrics) is in `models/xgb_history_v2_metadata.json`, `models/cv_metrics_processed_only.json`, and `models/cv_metrics_2025-26_gw1_30.json`.
 
 ---
 
-## 9-Week Syllabus
-
-The team is split into two parallel tracks that converge at weekly sync points.
-
-| Week | Team A: ML & Agents | Team B: App & Deployment | Joint Sync Point |
-|------|---------------------|--------------------------|------------------|
-| **1-2** | **Baseline ML** — Train V0 model & set up data pipeline | **UI Scaffold** — Pitch view with mock data | **Contract**: JSON shape for a "Lineup" |
-| **3-4** | **Orchestration** — Connect agents via LangGraph | **Integration** — Frontend ↔ Agent API | **First Demo**: Real AI suggestion in the UI |
-| **5-6** | **Optimisation** — Cost-benefit & chip logic | **User Features** — History & compare views | **Deploy**: Alpha to Vercel / AWS |
-| **7-8** | **Fine-tuning** — ML V1 & explainability | **Edge cases** — Blank GWs & injuries | **Audit** vs actual GW results |
-| **9** | **Polish** — Latency & API speed | **UI/UX** — Motion & mobile | **Handover** |
-
----
-
-## Repository layout
+## Repo layout
 
 ```
 fpl-optimizers-agentic-ai/
-|
-+-- analysis/                    # ML pipeline — Statistician / features
-|   +-- data_ingestion.py
-|   +-- data_cleaning.py
-|   +-- feature_engineering.py
-|   +-- master_feature_engineering.py
-|   +-- fpl_pipeline.py
-|   +-- gw_prediction_metrics.py
-|   +-- compute_cv_metrics.py    # Walk-forward CV → models/cv_metrics_*.json
-|   +-- *.ipynb                  # EDA & model training notebooks
-|
-+-- agents/                      # LangGraph & agent logic
-|   +-- stats_agent/             # GW batch predictions
-|   +-- sporting_director/       # Transfers, squad, fixtures
-|   +-- manager_agent.py         # Captaincy / armband
-|
-+-- app/                         # React + Vite + Tailwind frontend
-+-- backend/                     # FastAPI — bridges UI to agents
-+-- models/                      # Trained model artifacts + CV metric JSON
-|   +-- xgb_history_v2_metadata.json
-|   +-- cv_metrics_processed_only.json
-|   +-- cv_metrics_2025-26_gw1_30.json     # 2025-26 GW2–30 walk-forward (see README)
-+-- data/                        # Processed CSV + API/cache JSON (raw seasons not committed)
-+-- scripts/                     # CLI helpers (e.g. full optimizer run)
-+-- reports/                     # Notebook-generated charts
-+-- .github/workflows/           # Scheduled / CI workflows
-+-- train_with_history.py        # Optional history-aware training entrypoint
-+-- update_data.py               # Data refresh helper
-+-- requirements.txt             # Includes backend/requirements.txt
-+-- README.md
+├── agents/
+│   ├── stats_agent/            # Stats Agent — LangGraph, batched XGBoost inference
+│   ├── sporting_director/      # Sporting Director — VORP, multi-transfer, squad health
+│   ├── manager_agent.py        # Manager Agent — XI, captain, chips
+│   ├── STATS_AGENT.md          # Stats Agent spec
+│   ├── SPORTING_DIRECTOR.md    # Sporting Director spec
+│   └── manager_agent.md        # Manager Agent spec
+├── analysis/                   # Feature engineering pipeline + EDA notebooks
+│   ├── data_ingestion.py       # FPL CSV + bootstrap loaders
+│   ├── data_cleaning.py
+│   ├── feature_engineering.py  # base rolling features
+│   ├── master_feature_engineering.py  # advanced features (xP, xGI, team/opponent, ELO)
+│   ├── fpl_pipeline.py         # orchestrates ingestion → cleaning → features
+│   ├── compute_cv_metrics.py   # walk-forward CV → models/cv_metrics_*.json
+│   ├── gw_prediction_metrics.py  # single-GW snapshot vs actuals
+│   ├── fpl_eda_analysis.ipynb
+│   └── fpl_model_training.ipynb
+├── app/                        # React + Vite + Tailwind + Recharts frontend
+│   ├── src/components/         # screens + UI (PlayerCard, AgentProgressBar, …)
+│   ├── src/data/               # fake-data prototype dataset
+│   ├── src/utils/              # CSV/JSON export, formation rules
+│   └── CLAUDE.md               # frontend implementation rules + design tokens
+├── backend/
+│   ├── main.py                 # FastAPI server, caches Stats Agent output per GW
+│   └── requirements.txt        # canonical Python deps
+├── data/
+│   ├── bootstrap_static.json   # cached FPL bootstrap snapshot
+│   └── processed_fpl_data.csv  # master player-GW dataset (overwritten weekly)
+├── models/                     # trained XGBoost artifacts + CV metrics
+├── reports/                    # evaluation plots
+├── scripts/
+│   └── run_optimizer.py        # end-to-end runner: team ID → Stats → SD + Manager
+├── train_with_history.py       # train XGBoost on 6 seasons + walk-forward CV
+├── update_data.py              # weekly data refresh (used by GitHub Action)
+└── requirements.txt            # forwards to backend/requirements.txt
 ```
 
 ---
 
-## Getting Started
+## Quickstart
 
-### 1. Clone
+Tested on Python 3.10+ / Node 18+. Windows commands shown; on macOS/Linux use `source .venv/bin/activate`.
 
-```bash
+```powershell
+# 1. Clone + Python env
 git clone https://github.com/moyez48/fpl-optimizers-agentic-ai.git
 cd fpl-optimizers-agentic-ai
-```
-
-### 2. Python environment
-
-```bash
 python -m venv .venv
-
-# Windows
 .venv\Scripts\activate
-
-# macOS / Linux
-source .venv/bin/activate
-
 pip install -r requirements.txt
+
+# 2. (Optional) Re-train the XGBoost model
+#    The trained model is committed under models/, so this is only needed
+#    if you change features or retrain from fresh historical CSVs.
+#    Requires raw Vaastav season CSVs under data/<season>/gws/merged_gw.csv —
+#    see "Data" below.
+python train_with_history.py
+
+# 3. Run the full pipeline for any FPL team ID
+python scripts/run_optimizer.py 5858754
+#    → fetches your live squad from the FPL API
+#    → runs Stats Agent (~60s on first call), then Manager + Sporting Director
+#    → prints formation, captain, transfer recommendations to stdout
+
+# 4. (Optional) Run the FastAPI backend
+uvicorn backend.main:app --host 0.0.0.0 --port 8006 --reload
+#    → POST /api/stats         — full ranked player list for a GW
+#    → GET  /api/predict/{id}  — single-player prediction
+#    → API docs: http://127.0.0.1:8006/docs
+#    → first request per GW runs the graph (~60s); subsequent ones are <1ms
+
+# 5. (Optional) Run the React frontend
+cd app
+npm install
+npm run dev   # default Vite port 5173 — backend CORS is pre-configured
 ```
 
-### 3. Raw FPL season data (for rebuilding `processed_fpl_data.csv`)
+The standalone runner in step 3 is the fastest way to verify everything works. It needs network access to `fantasy.premierleague.com`.
 
-Download the [Vaastav FPL Historical Dataset](https://github.com/vaastav/Fantasy-Premier-League/) and place seasons under `data/`:
+---
 
-```
-data/
-  2024-25/gws/merged_gw.csv
-  2025-26/gws/merged_gw.csv
-```
+## Weekly data refresh
 
-### 4. Run the feature pipeline
+`update_data.py` runs the five-step pipeline **fetch → load → merge → engineer → save**, refreshing `data/processed_fpl_data.csv` so the model and Stats Agent always see the latest finished gameweek.
+
+- **Source:** FPL bootstrap-static (for the latest finished GW number) + the [olbauday/FPL-Core-Insights](https://github.com/olbauday/FPL-Core-Insights) repo for that GW's player-level CSV.
+- **Re-engineering:** all rolling features (last-3/5/10 averages, EWM, xP windows, team/opponent strength, transfer momentum) are recomputed across the full updated dataset — `MasterFPLFeatureEngineer` is idempotent for existing rows.
+- **Safe write:** `.tmp` → `.bak` → atomic rename. The Stats Agent reads the CSV fresh on each invocation, so no backend restart is needed after a refresh.
+- **Schedule:** runs every Thursday 00:00 UTC via GitHub Action; also exposes a manual `workflow_dispatch` trigger.
+
+Run locally with `python update_data.py`.
+
+---
+
+## Agent specs
+
+The README is intentionally a top-level overview. The authoritative contracts live alongside the code:
+
+- **`agents/STATS_AGENT.md`** — Stats Agent: graph nodes, output schema, per-feature semantics. Treat as the data contract for downstream agents.
+- **`agents/SPORTING_DIRECTOR.md`** — Sporting Director: VORP scoring, sell-price lock, multi-transfer evaluation, squad health flags, full LangGraph state contract for `FPLOptimizerState`.
+- **`agents/manager_agent.md`** — Manager Agent: formation enumeration, bench-ordering rule (GK always slot 4), dynamic median-based chip thresholds with floor.
+- **`app/CLAUDE.md`** — Frontend implementation rules: agent-pipeline UI contract, fake-data schema, formation/FDR rendering rules, design tokens.
+
+---
+
+## Data
+
+Historical seasons are not redistributed in this repo. To rebuild `data/processed_fpl_data.csv` from raw, download the [Vaastav FPL Historical Dataset](https://github.com/vaastav/Fantasy-Premier-League/) and place each season under `data/<season>/gws/merged_gw.csv`, then run the feature pipeline:
 
 ```python
 from analysis.fpl_pipeline import FPLPipeline
-
-pipeline = FPLPipeline(base_path="data")
-pipeline.run_full_pipeline()
-# Writes data/processed_fpl_data.csv
+FPLPipeline(base_path="data").run_full_pipeline()
 ```
-
-### 5. Jupyter notebooks
-
-```bash
-jupyter notebook analysis/fpl_eda_analysis.ipynb
-jupyter notebook analysis/fpl_model_training.ipynb
-```
-
-### 6. Backend (FastAPI)
-
-From the **repository root**:
-
-```bash
-uvicorn backend.main:app --host 0.0.0.0 --port 8006 --reload
-```
-
-- API docs: `http://127.0.0.1:8006/docs`  
-- First stats request per gameweek may take ~minute while the LangGraph batch run completes; results are cached per (season, gameweek).
-
-### 7. Frontend (Vite)
-
-```bash
-cd app
-npm install
-npm run dev
-```
-
-Default dev server: `http://localhost:5173` (CORS is configured for common Vite ports in `backend/main.py`).
-
-### 8. CLI — full pipeline without HTTP
-
-From the repo root (requires network access to the FPL API for live squad data):
-
-```bash
-python scripts/run_optimizer.py <FPL_MANAGER_ID>
-```
-
----
-
-## Data Credit
-
-All raw match and player data is sourced from the **Vaastav FPL Historical Dataset**.
 
 > Anand, V. (2022). *FPL Historical Dataset*. https://github.com/vaastav/Fantasy-Premier-League/
-
-This repository does not redistribute raw season CSV files; download them from the link above.
-
----
-
-*FPL Optimizer — Agentic AI Edition — Team project — 2025-26*
