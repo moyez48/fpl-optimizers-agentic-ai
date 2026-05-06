@@ -39,6 +39,17 @@ export default function App() {
   /** Upper GW bound for the CSV/model (from API or inferred when a bad GW request fails). */
   const [gwDatasetCap, setGwDatasetCap] = useState(null)
 
+  /** Highest GW selectable in Stats picker — max(csv_max+1, FPL planning GW), capped at 38. */
+  const planningSelectableMax = useCallback((datasetMaxLike, planningGwLike) => {
+    const dm = Number(datasetMaxLike)
+    const pg = Number(planningGwLike)
+    const candidates = []
+    if (Number.isFinite(dm)) candidates.push(Math.min(38, dm + 1))
+    if (Number.isFinite(pg)) candidates.push(Math.min(38, pg))
+    if (candidates.length === 0) return 38
+    return Math.min(38, Math.max(...candidates))
+  }, [])
+
   // Holds the in-flight API promises so LoadingScreen can await them
   const statsPromiseRef     = useRef(null)
   const transfersPromiseRef = useRef(null)
@@ -50,9 +61,11 @@ export default function App() {
     userInputRef.current = input
     setAgentData(null)
     setAgentError(null)
+    setAgentWarning(null)
+    setGwDatasetCap(null)
 
-    // Kick off stats call immediately — runs in parallel with the loading animation
-    statsPromiseRef.current = fetchStats({ gameweek: input.gameweek ?? null })
+    // Omit gameweek on first load — backend resolves FPL is_next after optional CSV refresh.
+    statsPromiseRef.current = fetchStats({})
 
     // Kick off Sporting Director call only when the user has a real FPL squad
     // (demo/fake player IDs won't match FPL element IDs in the dataset)
@@ -61,12 +74,10 @@ export default function App() {
         playerIds:     input.squadIds,
         bank:          input.bank ?? 0,
         freeTransfers: input.freeTransfers ?? 1,
-        gameweek:      input.gameweek ?? null,
       })
       managerPromiseRef.current = fetchManager({
         playerIds:     input.squadIds,
         bank:          input.bank ?? 0,
-        gameweek:      input.gameweek ?? null,
         tripleCaptain: input.chips?.tripleCaptain ?? true,
         benchBoost:    input.chips?.benchBoost ?? true,
       })
@@ -120,9 +131,8 @@ export default function App() {
         adapted.planningGameweek = adapted.transferRecommendation.planningGameweek
       }
 
-      const gwCap = adapted.datasetMaxGw ?? adapted.gameweek
-      if (gwCap != null) {
-        setGwDatasetCap(gwCap)
+      if (adapted.datasetMaxGw != null) {
+        setGwDatasetCap(adapted.datasetMaxGw)
       }
       setAgentWarning(adapted.gwFallbackWarning ?? null)
       setAgentData(adapted)
@@ -146,21 +156,22 @@ export default function App() {
     const ui = userInputRef.current
     if (!ui || gw == null || Number.isNaN(Number(gw))) return
     const g = Number(gw)
-    const max = gwDatasetCap ?? agentData?.datasetMaxGw ?? agentData?.gameweek
-    if (max != null && g > max) {
+    const datasetMax = gwDatasetCap ?? agentData?.datasetMaxGw
+    const planningMax = planningSelectableMax(datasetMax ?? null, agentData?.planningGameweek ?? null)
+    if (planningMax != null && g > planningMax) {
       setAgentError(
-        `GW${g} is not in the dataset yet (available: GW1–GW${max}). Refresh data after that gameweek is processed.`,
+        `GW${g} is not available yet (planning range: GW1–GW${planningMax}; data through GW${datasetMax ?? '—'}). Refresh data if stuck.`,
       )
       return
     }
     setStatsGwLoading(true)
     setAgentError(null)
     try {
-      const rawStats = await fetchStats({ gameweek: g, season: null })
+      const rawStats = await fetchStats({ gameweek: g })
       const allRanked = rawStats.ranked?.ALL
       if (!Array.isArray(allRanked) || allRanked.length === 0) {
         throw new Error(
-          rawStats.detail || `No model rows for GW${g}. Pick GW1–GW${max ?? '?'}.`,
+          rawStats.detail || `No model rows for GW${g}. Pick GW1–GW${planningMax ?? '?'}.`,
         )
       }
       const squadIds = ui.isLiveData ? ui.squadIds : null
@@ -193,9 +204,8 @@ export default function App() {
         }
       }
 
-      const gwCap = adapted.datasetMaxGw ?? adapted.gameweek
-      if (gwCap != null) {
-        setGwDatasetCap(gwCap)
+      if (adapted.datasetMaxGw != null) {
+        setGwDatasetCap(adapted.datasetMaxGw)
       }
       setAgentWarning(adapted.gwFallbackWarning ?? null)
       setAgentData(adapted)
@@ -203,15 +213,18 @@ export default function App() {
       const msg = err.message ?? String(err)
       const inferred = parseDatasetGwMaxFromStatsError(msg)
       if (inferred != null) {
-        setGwDatasetCap((prev) => (prev == null ? inferred : Math.min(prev, inferred)))
+        setGwDatasetCap((prev) => Math.max(prev ?? 0, inferred))
       }
       setAgentError(msg)
     } finally {
       setStatsGwLoading(false)
     }
-  }, [agentData?.datasetMaxGw, agentData?.gameweek, gwDatasetCap])
+  }, [agentData?.datasetMaxGw, agentData?.gameweek, agentData?.planningGameweek, gwDatasetCap, planningSelectableMax])
 
   const isResultScreen = [SCREENS.STATS, SCREENS.MANAGER, SCREENS.DASHBOARD].includes(screen)
+
+  /** Single GW for nav, tabs, Stats header, picker — whatever the Stats API last succeeded with. */
+  const selectedGw = agentData?.gameweek ?? null
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -228,9 +241,9 @@ export default function App() {
 
           {/* GW badge */}
           <div className="flex items-center gap-2">
-            {agentData?.gameweek != null && (
+            {selectedGw != null && (
               <span className="text-[10px] font-bold text-primary/70 bg-primary/10 px-2 py-1 rounded-lg border border-primary/20">
-                GW{agentData.gameweek}
+                GW{selectedGw}
               </span>
             )}
             {screen !== SCREENS.INPUT && screen !== SCREENS.LOADING && (
@@ -295,16 +308,24 @@ export default function App() {
         {screen === SCREENS.STATS    && (
           <StatsScreen
             agentData={agentData}
+            selectedGw={selectedGw}
             agentError={agentError}
             agentWarning={agentWarning}
             userInput={userInput}
             statsGwLoading={statsGwLoading}
             onGameweekChange={handleStatsGameweekChange}
-            selectableGwMax={gwDatasetCap ?? agentData?.datasetMaxGw ?? agentData?.gameweek ?? null}
+            selectableGwMax={planningSelectableMax(
+              gwDatasetCap ?? agentData?.datasetMaxGw ?? null,
+              agentData?.planningGameweek ?? null,
+            )}
           />
         )}
-        {screen === SCREENS.MANAGER  && <ManagerScreen agentData={agentData} userInput={userInput} />}
-        {screen === SCREENS.DASHBOARD&& <Dashboard agentData={agentData} userInput={userInput} onReset={handleReset} />}
+        {screen === SCREENS.MANAGER  && (
+          <ManagerScreen agentData={agentData} userInput={userInput} selectedGw={selectedGw} />
+        )}
+        {screen === SCREENS.DASHBOARD&& (
+          <Dashboard agentData={agentData} userInput={userInput} selectedGw={selectedGw} onReset={handleReset} />
+        )}
       </main>
     </div>
   )

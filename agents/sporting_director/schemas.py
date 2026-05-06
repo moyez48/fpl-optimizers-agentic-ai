@@ -138,7 +138,7 @@ class Squad:
     players:        List[PlayerProfile]
     bank:           float   # £m remaining
     free_transfers: int = 1
-    gameweek:       int = 30
+    gameweek:       int = 35
 
     @property
     def total_value(self) -> float:

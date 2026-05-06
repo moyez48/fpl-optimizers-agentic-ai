@@ -1,10 +1,11 @@
 import React from 'react'
 import { exportCSV, exportJSON } from '../../utils/export'
 
-export default function Dashboard({ agentData = null, userInput = null, onReset }) {
+export default function Dashboard({ agentData = null, userInput = null, selectedGw = null, onReset }) {
   if (!agentData) return null
 
-  const gameweek  = agentData.gameweek ?? userInput?.gameweek ?? '—'
+  const gameweek =
+    selectedGw != null ? selectedGw : (agentData?.gameweek ?? userInput?.gameweek ?? '—')
   const captain   = agentData.captainShortlist?.[0]
   const transfer  = agentData.transferRecommendation?.transfers?.[0] ?? null
 

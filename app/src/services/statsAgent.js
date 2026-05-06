@@ -58,11 +58,14 @@ export function parseDatasetGwMaxFromStatsError(message) {
   return null
 }
 
-export async function fetchStats({ gameweek = null, season = null } = {}) {
+export async function fetchStats({ gameweek, season } = {}) {
+  const payload = {}
+  if (gameweek != null && Number.isFinite(Number(gameweek))) payload.gameweek = Number(gameweek)
+  if (season != null && String(season).trim()) payload.season = String(season).trim()
   const res = await fetch('/api/stats', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ gameweek, season }),
+    body: JSON.stringify(payload),
   })
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
@@ -136,22 +139,23 @@ function deriveByPositionFromRanked(players) {
 export async function fetchManager({
   playerIds,
   bank = 0,
-  gameweek = null,
-  season = null,
+  gameweek,
+  season,
   tripleCaptain = true,
   benchBoost = true,
 } = {}) {
+  const payload = {
+    player_ids: playerIds,
+    bank,
+    triple_captain: tripleCaptain,
+    bench_boost: benchBoost,
+  }
+  if (gameweek != null && Number.isFinite(Number(gameweek))) payload.gameweek = Number(gameweek)
+  if (season != null && String(season).trim()) payload.season = String(season).trim()
   const res = await fetch('/api/manager', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      player_ids: playerIds,
-      bank,
-      gameweek,
-      season,
-      triple_captain: tripleCaptain,
-      bench_boost: benchBoost,
-    }),
+    body: JSON.stringify(payload),
   })
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
@@ -160,17 +164,18 @@ export async function fetchManager({
   return res.json()
 }
 
-export async function fetchTransfers({ playerIds, bank = 0, freeTransfers = 1, gameweek = null, season = null } = {}) {
+export async function fetchTransfers({ playerIds, bank = 0, freeTransfers = 1, gameweek, season } = {}) {
+  const payload = {
+    player_ids: playerIds,
+    bank,
+    free_transfers: freeTransfers,
+  }
+  if (gameweek != null && Number.isFinite(Number(gameweek))) payload.gameweek = Number(gameweek)
+  if (season != null && String(season).trim()) payload.season = String(season).trim()
   const res = await fetch('/api/transfers', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      player_ids: playerIds,
-      bank,
-      free_transfers: freeTransfers,
-      gameweek,
-      season,
-    }),
+    body: JSON.stringify(payload),
   })
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
@@ -448,6 +453,8 @@ export function adaptToStatsOutput(apiResponse, squadIds = null) {
     globalTop11XPts,
     captainShortlist,
     gameweek:             apiResponse.gameweek,
+    planningGameweek:     apiResponse.planning_gameweek ?? null,  // FPL's upcoming deadline (is_next)
+    season:               apiResponse.season ?? null,
     gwHasActualScores,
     datasetMinGw:         apiResponse.dataset_gw_min ?? null,
     datasetMaxGw:         apiResponse.dataset_gw_max ?? null,

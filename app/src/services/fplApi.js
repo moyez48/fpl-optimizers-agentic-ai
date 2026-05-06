@@ -44,12 +44,30 @@ export async function fetchTeamHistory(teamId) {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /**
- * Returns the current or next active gameweek object from the events array.
+ * Event ID to pass to `/entry/{id}/event/{id}/picks/`.
+ * FPL exposes a reliable picks payload for `is_current` first; requesting `is_next`
+ * alone often 404s (picks not created yet), which breaks Team ID import.
  */
-export function getCurrentEvent(events) {
+export function getEventForTeamPicks(events) {
+  if (!Array.isArray(events) || events.length === 0) return null
   const current = events.find(e => e.is_current)
   const next = events.find(e => e.is_next)
   return current || next || events[events.length - 1]
+}
+
+/**
+ * Default GW for planner / optimizer UI — upcoming deadline (`is_next`) when set.
+ */
+export function getPlannerGameweekEvent(events) {
+  if (!Array.isArray(events) || events.length === 0) return null
+  const next = events.find(e => e.is_next)
+  const current = events.find(e => e.is_current)
+  return next || current || events[events.length - 1]
+}
+
+/** @deprecated Prefer getEventForTeamPicks or getPlannerGameweekEvent for clarity */
+export function getCurrentEvent(events) {
+  return getEventForTeamPicks(events)
 }
 
 /**
@@ -205,9 +223,10 @@ export async function importFPLTeam(teamId) {
     fetchTeamHistory(id),
   ])
 
-  // Step 2: Determine current GW
-  const currentEvent = getCurrentEvent(bootstrap.events)
-  const gameweek = currentEvent.id
+  // Step 2: GW whose picks endpoint is valid (not is_next-first — see getEventForTeamPicks).
+  const picksEvent = getEventForTeamPicks(bootstrap.events)
+  if (!picksEvent?.id) throw new Error('Could not read gameweek from FPL bootstrap.')
+  const gameweek = picksEvent.id
 
   // Step 3: Picks for that GW
   const picksData = await fetchTeamPicks(id, gameweek)

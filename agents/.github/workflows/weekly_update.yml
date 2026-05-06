@@ -1,22 +1,24 @@
-name: Weekly FPL Data Update
+name: FPL CSV auto-update
 
-# This tells GitHub WHEN to run the script
 on:
   schedule:
-    # Runs at 00:00 UTC every Thursday
-    - cron: '0 0 * * 4'
-  workflow_dispatch: # Adds a button so you can run it manually anytime
+    - cron: '25 6,18 * * *'
+  workflow_dispatch:
 
 jobs:
   update-data:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 

@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react'
 import { PLAYERS, DEMO_SQUAD_IDS } from '../../data/players'
 import { isSquadValid, squadErrors, totalPrice, countByPosition } from '../../utils/formations'
-import { importFPLTeam, fetchBootstrap, getCurrentEvent, transformPlayers } from '../../services/fplApi'
+import { importFPLTeam, fetchBootstrap, getPlannerGameweekEvent, transformPlayers } from '../../services/fplApi'
 import PlayerCard from '../ui/PlayerCard'
 
 const POSITIONS = ['GKP', 'DEF', 'MID', 'FWD']
@@ -14,7 +14,9 @@ export default function InputScreen({ onRun }) {
   // ── Squad / config state ────────────────────────────────────────────────────
   const [playerPool, setPlayerPool] = useState(PLAYERS)  // can be swapped for real FPL data
   const [squadIds, setSquadIds]       = useState([])
-  const [gameweek, setGameweek]       = useState(30)
+  // Planning gameweek (is_next from FPL API, i.e. upcoming deadline). Fallback 36 is ~May timeframe.
+  // This is the GW you're making transfers FOR. Model predictions use the latest finished GW's data.
+  const [gameweek, setGameweek]       = useState(36)
   const [bank, setBank]               = useState(2.3)
   const [freeTransfers, setFreeTransfers] = useState(1)
   const [chips, setChips]             = useState({ tripleCaptain: true, benchBoost: true, wildcard: false, freeHit: false })
@@ -27,7 +29,7 @@ export default function InputScreen({ onRun }) {
   useEffect(() => {
     fetchBootstrap()
       .then(bootstrap => {
-        const event = getCurrentEvent(bootstrap.events)
+        const event = getPlannerGameweekEvent(bootstrap.events)
         if (event?.id) setGameweek(event.id)
         const realPlayers = transformPlayers(bootstrap)
         if (realPlayers.length > 0) setPlayerPool(realPlayers)

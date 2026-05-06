@@ -1,10 +1,10 @@
-name: Weekly FPL Data Update
+name: FPL CSV auto-update
 
-# This tells GitHub WHEN to run the script
+# Merge + feature-engineered CSV commit when a new GW has finished.
+# Twice daily (cheap no-op via bootstrap-vs-CSV probe when nothing new).
 on:
   schedule:
-    # Runs at 00:00 UTC every Thursday
-    - cron: '0 0 * * 4'
+    - cron: '25 6,18 * * *'
   workflow_dispatch: # Adds a button so you can run it manually anytime
 
 jobs:
@@ -38,3 +38,12 @@ jobs:
           git add data/processed_fpl_data.csv
           git commit -m "Auto-update FPL features for new Gameweek" || echo "No changes to commit"
           git push
+
+      # Optional: Vercel "Deploy Hooks" redeploy Preview/Production when bot pushes
+      # are ignored. Add secret VERCEL_DEPLOY_HOOK_URL in repo Settings → Secrets.
+      - name: Trigger Vercel deploy hook (optional)
+        env:
+          HOOK_URL: ${{ secrets.VERCEL_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$HOOK_URL" ]; then echo "VERCEL_DEPLOY_HOOK_URL unset — skipping"; exit 0; fi
+          curl -fsS -X POST "$HOOK_URL" || echo "Deploy hook POST failed (check Vercel dashboard)"

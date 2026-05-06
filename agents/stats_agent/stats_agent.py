@@ -671,6 +671,135 @@ def engineer_features(state: StatsAgentState) -> StatsAgentState:
     }
 
 
+def _team_cumulative_points_through_gw(season_df: pd.DataFrame, gw_cap: int) -> pd.Series:
+    """
+    Per-team cumulative sum of player total_points through gw_cap (inclusive).
+
+    Used as a lightweight opponent-strength proxy when forecasting the next GW
+    before those rows exist in the CSV (planning mode).
+    """
+    if season_df.empty or gw_cap < 1:
+        return pd.Series(dtype=float)
+    sub = season_df[season_df["GW"] <= gw_cap]
+    per_gw = (
+        sub.groupby(["team", "GW"], observed=False)["total_points"]
+        .sum()
+        .reset_index()
+    )
+    per_gw = per_gw.sort_values(["team", "GW"])
+    per_gw["cum"] = per_gw.groupby("team", observed=False)["total_points"].cumsum()
+    return per_gw.groupby("team", observed=False).tail(1).set_index("team")["cum"]
+
+
+def _planning_fixture_by_team(
+    fixtures: list,
+    event_id: int,
+    team_id_to_name: dict[int, str],
+) -> dict[str, dict[str, Any]]:
+    """Map team display name → was_home, FDR, opponent name for this event."""
+    out: dict[str, dict[str, Any]] = {}
+    for fx in fixtures or []:
+        if fx.get("event") != event_id:
+            continue
+        hid, aid = fx.get("team_h"), fx.get("team_a")
+        if hid is None or aid is None:
+            continue
+        hn = (team_id_to_name.get(int(hid)) or "").strip()
+        an = (team_id_to_name.get(int(aid)) or "").strip()
+        if hn:
+            out[hn] = {
+                "was_home": True,
+                "fdr": float(fx.get("team_h_difficulty") or 3),
+                "opponent": an,
+            }
+        if an:
+            out[an] = {
+                "was_home": False,
+                "fdr": float(fx.get("team_a_difficulty") or 3),
+                "opponent": hn,
+            }
+    return out
+
+
+def _apply_planning_gw_fixture_patch(
+    pred_df: pd.DataFrame,
+    *,
+    planning_gw: int,
+    fixtures: list | None,
+    bootstrap: dict | None,
+    season_df: pd.DataFrame,
+    data_mx: int,
+    log: list,
+) -> pd.DataFrame:
+    """
+    For GW max+1 forecasts: keep lagged features from GW data_mx rows but refresh
+    fixture-sensitive inputs using official /fixtures/ for `planning_gw`.
+    """
+    out = pred_df.copy()
+    team_id_to_name = {
+        int(t["id"]): str(t.get("name") or "").strip()
+        for t in (bootstrap or {}).get("teams", [])
+        if t.get("id") is not None
+    }
+    fx_map = _planning_fixture_by_team(fixtures or [], planning_gw, team_id_to_name)
+    cum_strength = _team_cumulative_points_through_gw(season_df, data_mx)
+    fallback_strength = float(cum_strength.median()) if len(cum_strength) else 0.0
+
+    if not fx_map:
+        log.append(
+            f"run_model: planning GW{planning_gw} — no fixture rows in API payload; "
+            f"keeping home/FDR from GW{data_mx} CSV rows"
+        )
+        return out
+
+    opp_list: list[str] = []
+    for idx in out.index:
+        t = str(out.at[idx, "team"]).strip()
+        info = fx_map.get(t)
+        if info:
+            out.at[idx, "was_home"] = bool(info["was_home"])
+            if "fdr" in out.columns:
+                out.at[idx, "fdr"] = float(info["fdr"])
+            opp_list.append(str(info.get("opponent") or "").strip())
+        else:
+            opp_list.append("")
+
+    opp_strength: list[float] = []
+    for opp in opp_list:
+        if not opp:
+            opp_strength.append(fallback_strength)
+            continue
+        if opp in cum_strength.index:
+            opp_strength.append(float(cum_strength.loc[opp]))
+            continue
+        opp_cf = opp.casefold()
+        matched = False
+        for t_idx, val in cum_strength.items():
+            if str(t_idx).strip().casefold() == opp_cf:
+                opp_strength.append(float(val))
+                matched = True
+                break
+        if not matched:
+            opp_strength.append(fallback_strength)
+
+    if "opponent_strength" in out.columns:
+        out["opponent_strength"] = opp_strength
+
+    _enc = {"GK": 0, "DEF": 1, "MID": 2, "FWD": 3}
+    if "opponent_strength" in out.columns:
+        out["pos_x_opp_strength"] = (
+            out["position"].map(_enc).fillna(0) * out["opponent_strength"].fillna(0)
+        )
+    if "xP_last_3" in out.columns:
+        out["home_x_xP"] = out["was_home"].astype(float) * out["xP_last_3"].fillna(0)
+
+    log.append(
+        f"run_model: planning patch for GW{planning_gw} applied "
+        f"({len(fx_map)} teams from fixtures API)"
+    )
+    return out
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # NODE 4 — run_model
 # Loads the saved XGBoost model and runs predict() on the target GW rows.
@@ -689,33 +818,61 @@ def run_model(state: StatsAgentState) -> StatsAgentState:
         df = state["feature_df"]
         season = state["season"]
 
-        # Determine target GW
         season_df = df[df["season"] == season]
-        if state["gameweek"] is not None:
-            target_gw = state["gameweek"]
-        else:
-            target_gw = int(season_df["GW"].max())
+        mx = int(season_df["GW"].max()) if len(season_df) else 0
+        if mx == 0:
+            return {
+                **state,
+                "error": f"run_model: no data at all for season {season}.",
+                "log": log,
+            }
 
-        pred_df = season_df[season_df["GW"] == target_gw].copy()
+        requested_gw = int(state["gameweek"]) if state["gameweek"] is not None else mx
+        forecast_mode = requested_gw > mx
 
-        if pred_df.empty:
-            mx = int(season_df["GW"].max()) if len(season_df) else 0
-            if mx == 0:
-                return {
-                    **state,
-                    "error": f"run_model: no data at all for season {season}.",
-                    "log": log,
-                }
-            # Auto-fall back to latest available GW so the app never crashes
-            requested_gw = target_gw
-            target_gw = mx
-            pred_df = season_df[season_df["GW"] == target_gw].copy()
-            warning = (
-                f"GW{requested_gw} is not in the dataset yet "
-                f"(data runs through GW{mx}). Showing GW{mx}."
+        state = {**state, "gw_fallback_warning": None}
+
+        if forecast_mode:
+            # Any GW beyond CSV max: reuse latest-row features + live fixtures for the target GW.
+            # When CSV is several GWs behind, this still beats failing outright — refresh CSV ASAP.
+            target_gw = requested_gw
+            pred_df = season_df[season_df["GW"] == mx].copy()
+            pred_df = _apply_planning_gw_fixture_patch(
+                pred_df,
+                planning_gw=target_gw,
+                fixtures=state.get("fixtures"),
+                bootstrap=state.get("bootstrap"),
+                season_df=season_df,
+                data_mx=mx,
+                log=log,
             )
-            log.append(f"run_model: {warning}")
-            state = {**state, "gw_fallback_warning": warning}
+            if "GW" in pred_df.columns:
+                pred_df["GW"] = target_gw
+            if requested_gw > mx + 1:
+                state = {
+                    **state,
+                    "gw_fallback_warning": (
+                        f"GW{requested_gw} forecast uses GW{mx} as the latest rows in your CSV "
+                        f"(intermediate gameweeks missing — run python update_data.py or wait for ingest)."
+                    ),
+                }
+            log.append(
+                f"run_model: forecast GW{target_gw} from GW{mx} baseline rows + live fixtures"
+            )
+        else:
+            target_gw = requested_gw if state["gameweek"] is not None else mx
+            pred_df = season_df[season_df["GW"] == target_gw].copy()
+
+            if pred_df.empty:
+                requested_missing = target_gw
+                target_gw = mx
+                pred_df = season_df[season_df["GW"] == target_gw].copy()
+                warning = (
+                    f"GW{requested_missing} is not in the dataset yet "
+                    f"(data runs through GW{mx}). Showing GW{mx}."
+                )
+                log.append(f"run_model: {warning}")
+                state = {**state, "gw_fallback_warning": warning}
 
         # Fill any missing features with 0 (conservative default)
         missing = [f for f in FEATURES if f not in pred_df.columns]
@@ -1108,7 +1265,8 @@ def _detect_current_season() -> str:
       - Aug–Dec YYYY  →  'YYYY-(YYYY+1)'   e.g. Aug 2025 → '2025-26'
       - Jan–Jul YYYY  →  '(YYYY-1)-YYYY'   e.g. Mar 2026 → '2025-26'
 
-    Falls back to checking which seasons exist in the CSV as a safety net.
+    Falls back when the inferred season tab is absent from `processed_fpl_data.csv`
+    — uses whichever season reaches the highest gameweek in that file (not lexical sort).
     """
     from datetime import date
     today = date.today()
@@ -1118,13 +1276,12 @@ def _detect_current_season() -> str:
         start_year = today.year - 1
     season = f"{start_year}-{str(start_year + 1)[-2:]}"
 
-    # Safety check: confirm this season exists in the CSV; fall back if not
+    # Confirm this season exists in the CSV; if not, pick the season with highest GW max.
     try:
-        df = pd.read_csv(DATA_PATH, usecols=["season"])
-        available = df["season"].unique().tolist()
+        sdf = pd.read_csv(DATA_PATH, usecols=["season", "GW"])
+        available = sdf["season"].unique().tolist()
         if season not in available:
-            # Most recent season in the CSV as fallback
-            season = sorted(available)[-1]
+            season = str(sdf.groupby("season")["GW"].max().idxmax())
     except Exception:
         pass
 
@@ -1146,7 +1303,7 @@ def run_stats_agent(gameweek: int | None = None, season: str | None = None) -> d
     Example:
         from agents.stats_agent import run_stats_agent
         result = run_stats_agent()          # fully auto-detected
-        result = run_stats_agent(gameweek=30)
+        result = run_stats_agent(gameweek=35)
         top_players = result["ranked"]["ALL"][:10]
     """
     if season is None:

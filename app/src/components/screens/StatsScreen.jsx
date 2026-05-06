@@ -40,10 +40,12 @@ const POSITIONS = ['FWD', 'MID', 'DEF', 'GK']
 
 const COLS = '1.2rem 1fr 3.2rem 3.2rem 2.5rem'
 
-function PlayerRow({ player, idx, gwHasResults, sortBy }) {
-  const showActual = gwHasResults && player.actualPts != null
-  const diff = showActual
-    ? (player.actualPts - player.adjustedXPts).toFixed(1)
+/** Actual & differential only when GW results are authoritative (not pre-deadline CSV zeros). */
+function PlayerRow({ player, idx, showActualScores, sortBy }) {
+  const canCompareActual =
+    showActualScores && player.actualPts != null && Number.isFinite(Number(player.actualPts))
+  const diff = canCompareActual
+    ? (Number(player.actualPts) - Number(player.adjustedXPts)).toFixed(1)
     : null
 
   return (
@@ -70,24 +72,24 @@ function PlayerRow({ player, idx, gwHasResults, sortBy }) {
         {Number.isFinite(Number(player.adjustedXPts)) ? Number(player.adjustedXPts).toFixed(1) : '—'}
       </span>
 
-      {/* Actual — real integers once GW is scored; "—" only before data exists */}
-      <span className={`text-sm self-center text-right ${showActual ? (sortBy === 'actual' ? 'font-black text-fpl_text' : 'font-bold text-fpl_text/80') : 'text-fpl_text/20'}`}>
-        {gwHasResults ? (player.actualPts != null ? player.actualPts : '—') : '—'}
+      {/* Actual — em dash until live API has realised totals */}
+      <span className={`text-sm self-center text-right ${canCompareActual ? (sortBy === 'actual' ? 'font-black text-fpl_text' : 'font-bold text-fpl_text/80') : 'text-fpl_text/20'}`}>
+        {canCompareActual ? player.actualPts : '—'}
       </span>
 
       {/* +/- diff */}
       <span className={`text-[10px] font-semibold self-center text-right ${DIFF_COLOR(diff != null ? parseFloat(diff) : null)}`}>
-        {diff != null ? (parseFloat(diff) >= 0 ? `+${diff}` : diff) : ''}
+        {canCompareActual ? (parseFloat(diff) >= 0 ? `+${diff}` : diff) : '—'}
       </span>
     </div>
   )
 }
 
-function PositionSection({ position, players, limit, gwHasResults, sortBy }) {
+function PositionSection({ position, players, limit, showActualScores, sortBy }) {
   const [expanded, setExpanded] = useState(false)
 
   const sorted = useMemo(() => {
-    if (sortBy === 'actual' && gwHasResults) {
+    if (sortBy === 'actual' && showActualScores) {
       return [...players].sort((a, b) => {
         const av = a.actualPts
         const bv = b.actualPts
@@ -98,7 +100,7 @@ function PositionSection({ position, players, limit, gwHasResults, sortBy }) {
       })
     }
     return players
-  }, [players, sortBy, gwHasResults])
+  }, [players, sortBy, showActualScores])
 
   const visible = expanded ? sorted : sorted.slice(0, limit)
   const hasMore = sorted.length > limit
@@ -144,7 +146,7 @@ function PositionSection({ position, players, limit, gwHasResults, sortBy }) {
       </div>
 
       {visible.map((p, i) => (
-        <PlayerRow key={p.id} player={p} idx={i} gwHasResults={gwHasResults} sortBy={sortBy} />
+        <PlayerRow key={p.id} player={p} idx={i} showActualScores={showActualScores} sortBy={sortBy} />
       ))}
     </div>
   )
@@ -159,6 +161,8 @@ const ACTUAL_SOURCE_LABEL = {
 
 export default function StatsScreen({
   agentData = null,
+  /** Authoritative GW for this page (passed from App — matches last successful Stats API). */
+  selectedGw = null,
   agentError = null,
   agentWarning = null,
   userInput = null,
@@ -283,10 +287,34 @@ export default function StatsScreen({
   }
   const squadTotalXPts = displaySquadXPtsMemo ?? globalDisplayTop11XPts
 
-  const gwHasActualScores = agentData.gwHasActualScores === true
+  const pickerGw = selectedGw ?? agentData.gameweek ?? 1
+  /** FPL deadline we're planning for (`is_next`) — same as Stats API planning_gameweek. */
+  const planningGwNum =
+    agentData.planningGameweek != null && Number.isFinite(Number(agentData.planningGameweek))
+      ? Number(agentData.planningGameweek)
+      : null
+  const selectedGwNum =
+    pickerGw != null && Number.isFinite(Number(pickerGw)) ? Number(pickerGw) : null
+  const viewingUpcomingDeadline =
+    planningGwNum != null && selectedGwNum != null && selectedGwNum === planningGwNum
+  /** Backend uses FPL `/event/{gw}/live/` when available (authoritative totals). */
+  const hasOfficialLiveActuals =
+    agentData.actualScoresSource === 'fpl_event_live' ||
+    agentData.actualScoresSource === 'fpl_event_live_csv_gapfill'
+  /**
+   * GW36-style preview rows ship total_points = 0; backend still sets gw_has_actual_scores.
+   * Only compare xPts vs Actual when live scores exist OR we're clearly past placeholders.
+   */
+  const showActualScores =
+    agentData.gwHasActualScores === true &&
+    !(viewingUpcomingDeadline && !hasOfficialLiveActuals)
+
   const dsMin = agentData.datasetMinGw
-  /** Upper bound for selectable GWs: dataset max from API, else cap state, else current GW (conservative). */
-  const gwCap = selectableGwMax ?? agentData.datasetMaxGw ?? agentData.gameweek ?? null
+  /**
+   * Upper bound for selectable planning GWs.
+   * Parent passes (dataset max + 1), so users can select next GW forecasts.
+   */
+  const gwCap = selectableGwMax ?? null
   const dsMaxLabel = agentData.datasetMaxGw ?? gwCap
   const actualSrcKey = agentData.actualScoresSource
   const actualSrcLabel =
@@ -297,13 +325,25 @@ export default function StatsScreen({
       {/* Header */}
       <div>
         <p className="text-xs text-fpl_text/40 uppercase tracking-widest">Agent 1 Output</p>
-        <p className="text-lg font-black text-fpl_text">Statistician Report</p>
+        <p className="text-lg font-black text-fpl_text">
+          Statistician Report
+          <span className="text-primary ml-2">— GW{pickerGw}</span>
+        </p>
         <p className="text-[10px] text-primary/70 mt-0.5">
-          {userInput?.isLiveData ? '● Live FPL import' : '● Demo squad'} · xPts model GW{agentData.gameweek}
-          {agentData.planningGameweek != null && agentData.planningGameweek !== agentData.gameweek
-            ? ` · transfer plan GW${agentData.planningGameweek}`
-            : ''}{' '}
-          · XGBoost
+          {[
+            userInput?.isLiveData ? '● Live FPL import' : '● Demo squad',
+            agentData.season || null,
+            agentData.datasetMinGw != null && agentData.datasetMaxGw != null
+              ? `data GW${agentData.datasetMinGw}–GW${agentData.datasetMaxGw}`
+              : null,
+            `model GW${pickerGw}`,
+            viewingUpcomingDeadline && planningGwNum != null
+              ? 'upcoming round (Actual / +/- after kickoff)'
+              : null,
+            'XGBoost',
+          ]
+            .filter(Boolean)
+            .join(' · ')}
         </p>
         <label className="mt-2 flex items-center gap-2 cursor-pointer select-none">
           <input
@@ -358,7 +398,7 @@ export default function StatsScreen({
                 enabled:hover:border-primary/30 transition-colors
                 focus:outline-none focus:ring-1 focus:ring-primary/40"
             >
-              <span>GW{agentData.gameweek ?? 1}</span>
+              <span>GW{pickerGw}</span>
               <span className="text-[10px] text-fpl_text/45">{gwMenuOpen ? '▲' : '▼'}</span>
             </button>
             {gwMenuOpen && (
@@ -369,7 +409,7 @@ export default function StatsScreen({
               >
                 {Array.from({ length: 38 }, (_, i) => i + 1).map((gw) => {
                   const locked = gwCap != null && gw > gwCap
-                  const selected = (agentData.gameweek ?? 1) === gw
+                  const selected = Number(pickerGw) === gw
                   return (
                     <li key={gw} role="presentation">
                       <button
@@ -410,7 +450,7 @@ export default function StatsScreen({
         </div>
         {dsMin != null && dsMaxLabel != null && (
           <p className="text-[10px] text-fpl_text/40">
-            Model features cover GW{dsMin}–GW{dsMaxLabel} in your CSV. Later gameweeks are disabled until that week exists in your data.
+            Model features in CSV: GW{dsMin}–GW{agentData.datasetMaxGw ?? dsMaxLabel}. Planning forecasts selectable through GW{dsMaxLabel}.
           </p>
         )}
         <p className="text-[10px] text-fpl_text/35">
@@ -430,14 +470,16 @@ export default function StatsScreen({
         <p className="text-[10px] text-fpl_text/40">top 11 by predicted pts</p>
       </div>
 
-      {!gwHasActualScores && (
+      {!showActualScores && (
         <p className="text-[10px] text-fpl_text/40 text-center px-2">
-          Actual points show here once this gameweek is in your data (after you run the data refresh).
+          {viewingUpcomingDeadline
+            ? 'Actual points and differentials appear after this gameweek is live on the official FPL API.'
+            : 'Actual points show here once this gameweek is in your data (after you run the data refresh).'}
         </p>
       )}
 
       {/* Sort toggle */}
-      {gwHasActualScores && (
+      {showActualScores && (
         <div className="flex items-center justify-center gap-1 bg-card rounded-xl p-1 border border-white/5">
           <button
             onClick={() => setSortBy('xPts')}
@@ -469,7 +511,7 @@ export default function StatsScreen({
           position={pos}
           players={players}
           limit={POSITION_LIMITS[pos] ?? 50}
-          gwHasResults={gwHasActualScores}
+          showActualScores={showActualScores}
           sortBy={sortBy}
         />
       ))}

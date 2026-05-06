@@ -1,4 +1,4 @@
-# FPL Optimizer
+﻿# FPL Optimizer
 
 An end-to-end Fantasy Premier League optimizer built as a **3-agent LangGraph pipeline** on top of an **XGBoost points predictor**. Give it your FPL team ID — it pulls your live squad, projects every player's next-GW score, picks the optimal Starting XI + captain, and ranks single- and multi-transfer options under the real FPL price-lock and budget rules.
 
@@ -58,6 +58,11 @@ The system runs end-to-end today. The remaining open work is **empirical calibra
 ```
 
 **Why three agents?** Splits are by **decision domain, not data flow**: Stats predicts and never decides; Sporting Director owns money and the 15-player squad; Manager owns the 11-player XI, captain, and chip activation. Each agent owns its own slice of the shared `FPLOptimizerState`, so any of them can be replaced or tested in isolation without touching the others. The LangGraph node-with-error-exit pattern means a failure inside one agent surfaces cleanly without corrupting downstream state.
+
+### Frontend (gameweek state & pre-deadline scores)
+
+- **Single gameweek display**: Nav badge, Statistician header, and “View gameweek” all use **`selectedGw`** from the last successful stats response (`App.jsx` passes it to Stats / Dashboard / Manager).
+- **Planning round**: Before official FPL **`/event/{gw}/live/`** scores exist for that gameweek, **Actual** and **+/-** columns show **—** so CSV placeholder zeros never produce bogus negative deltas vs xPts.
 
 **Calibration TODO.** Several agent thresholds are placeholders awaiting empirical tuning — `vorp_replacement_pct`, `rotation_risk` minutes/start-prob cutoffs, `form_declining` and `high_volatility` deltas, the wildcard 5-player / 2-flag trigger, and the chip-floor constants in the Manager. The specs in `agents/` flag each one explicitly.
 
@@ -130,13 +135,13 @@ fpl-optimizers-agentic-ai/
 │   └── requirements.txt        # canonical Python deps
 ├── data/
 │   ├── bootstrap_static.json   # cached FPL bootstrap snapshot
-│   └── processed_fpl_data.csv  # master player-GW dataset (overwritten weekly)
+│   └── processed_fpl_data.csv  # master player-GW dataset (overwritten weekly; includes is_next preview rows flagged `is_planning_gw`)
 ├── models/                     # trained XGBoost artifacts + CV metrics
 ├── reports/                    # evaluation plots
 ├── scripts/
 │   └── run_optimizer.py        # end-to-end runner: team ID → Stats → SD + Manager
 ├── train_with_history.py       # train XGBoost on 6 seasons + walk-forward CV
-├── update_data.py              # weekly data refresh (used by GitHub Action)
+├── update_data.py              # weekly data refresh (+ FPL `is_next` skeleton rows — see below)
 └── requirements.txt            # forwards to backend/requirements.txt
 ```
 
@@ -189,11 +194,13 @@ The standalone runner in step 3 is the fastest way to verify everything works. I
 `update_data.py` runs the five-step pipeline **fetch → load → merge → engineer → save**, refreshing `data/processed_fpl_data.csv` so the model and Stats Agent always see the latest finished gameweek.
 
 - **Source:** FPL bootstrap-static (for the latest finished GW number) + the [olbauday/FPL-Core-Insights](https://github.com/olbauday/FPL-Core-Insights) repo for that GW's player-level CSV.
+- **Upcoming gameweek (`is_next`):** after merging the latest finished GW, the pipeline appends preview rows for FPL's **`is_next`** event (CSV column **`is_planning_gw: true`**). Those rows carry fixtures and live **`ep_next`** from the official API, with realised stats cleared to **0**, so inference can run for every player before kickoff without dropping blanks.
+- **Staleness / skip logic:** freshness uses **finished** GWs only (planning preview rows never block re-ingest). If finished data is current but the **`is_next`** preview is missing, the script still runs to add it.
 - **Re-engineering:** all rolling features (last-3/5/10 averages, EWM, xP windows, team/opponent strength, transfer momentum) are recomputed across the full updated dataset — `MasterFPLFeatureEngineer` is idempotent for existing rows.
 - **Safe write:** `.tmp` → `.bak` → atomic rename. The Stats Agent reads the CSV fresh on each invocation, so no backend restart is needed after a refresh.
 - **Schedule:** runs every Thursday 00:00 UTC via GitHub Action; also exposes a manual `workflow_dispatch` trigger.
 
-Run locally with `python update_data.py`.
+Run locally with `python update_data.py`. Force a full rebuild with `python update_data.py --force` or `FORCE_FPL_CSV_UPDATE=1`.
 
 ---
 

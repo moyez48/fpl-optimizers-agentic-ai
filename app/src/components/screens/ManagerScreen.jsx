@@ -127,10 +127,11 @@ function PitchPlayerCard({ player, isCaptain, isViceCaptain }) {
   )
 }
 
-export default function ManagerScreen({ agentData = null, userInput = null }) {
+export default function ManagerScreen({ agentData = null, userInput = null, selectedGw = null }) {
   const [tab, setTab] = useState(0)
 
-  const gameweek         = agentData?.gameweek ?? userInput?.gameweek ?? '—'
+  const gameweek =
+    selectedGw != null ? selectedGw : (agentData?.gameweek ?? userInput?.gameweek ?? '—')
   const captainShortlist = agentData?.captainShortlist ?? []
   const liveTransferRec  = agentData?.transferRecommendation ?? null
   const planningGameweek = agentData?.planningGameweek ?? liveTransferRec?.planningGameweek

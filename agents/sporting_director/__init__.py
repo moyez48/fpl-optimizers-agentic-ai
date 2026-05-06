@@ -166,7 +166,7 @@ def _build_squad_from_state(state: dict) -> Squad:
             players        = players,
             bank           = float(squad_data.get("bank", state.get("bank", 0.0))),
             free_transfers = int(squad_data.get("free_transfers", state.get("free_transfers", 1))),
-            gameweek       = int(squad_data.get("gameweek", state.get("gameweek", 30))),
+            gameweek       = int(squad_data.get("gameweek", state.get("gameweek", 35))),
         )
 
     # Fallback: build from top-level state keys
@@ -178,7 +178,7 @@ def _build_squad_from_state(state: dict) -> Squad:
         players        = players,
         bank           = float(state.get("bank", 0.0)),
         free_transfers = int(state.get("free_transfers", 1)),
-        gameweek       = int(state.get("gameweek", 30)),
+        gameweek       = int(state.get("gameweek", 35)),
     )
 
 

@@ -27,17 +27,29 @@ subsequent request — for any player — is instant.  The cache is keyed on
 Run the server
 --------------
     uvicorn backend.main:app --host 0.0.0.0 --port 8006 --reload
+
+CSV ingest (cheap no-op when already current — see ``update_data.maybe_refresh_processed_csv``):
+    Runs automatically before each stats-agent run unless ``SKIP_FPL_CSV_REFRESH=1``.
+
+Periodic background sweep (optional):
+    ``AUTO_REFRESH_FPL_DATA=1`` and ``AUTO_REFRESH_INTERVAL_HOURS=12`` (default).
+
+Omit ``gameweek`` on POST ``/api/stats`` to default to FPL ``is_next`` (planning GW).
 """
 
 from __future__ import annotations
 
-import json
+import asyncio
 import os
 import sys
 import time
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
+import pandas as pd
+import requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -48,6 +60,7 @@ from pydantic import BaseModel
 # dirname(__file__)          → <repo_root>/backend/
 # dirname(dirname(__file__)) → <repo_root>/
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROCESSED_CSV = os.path.join(REPO_ROOT, "data", "processed_fpl_data.csv")
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
@@ -64,22 +77,70 @@ from agents.sporting_director import run_sporting_director   # noqa: E402
 from agents.sporting_director.schemas import Squad, PlayerProfile  # noqa: E402
 from agents.manager_agent import run_manager_agent  # noqa: E402
 
+
+def _truthy_env(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    sweep_task = None
+
+    # Optional: periodically pull merged GW CSV + re-run FE (see update_data.py).
+    # Default interval 12 h — cheap (~2 s) no-op via API probe when CSV is current.
+    if _truthy_env("AUTO_REFRESH_FPL_DATA"):
+        hours = float(os.getenv("AUTO_REFRESH_INTERVAL_HOURS", "12"))
+
+        async def _csv_refresh_sweep():
+            await asyncio.sleep(8)
+            import update_data
+
+            interval_sec = max(3600.0, hours * 3600.0)
+            try:
+                while True:
+                    try:
+                        await asyncio.to_thread(update_data.maybe_refresh_processed_csv, False)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(interval_sec)
+            except asyncio.CancelledError:
+                raise
+
+        sweep_task = asyncio.create_task(_csv_refresh_sweep())
+        print(
+            f"[backend] AUTO_REFRESH_FPL_DATA=1 · interval={hours}h "
+            "(set AUTO_REFRESH_INTERVAL_HOURS to adjust)",
+            flush=True,
+        )
+
+    yield
+
+    if sweep_task is not None:
+        sweep_task.cancel()
+        try:
+            await sweep_task
+        except asyncio.CancelledError:
+            pass
+
+
 # ── App setup ─────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="FPL Stats Agent API",
     description="LangGraph-powered FPL point prediction backend.",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
-# CORS — allow all the Vite dev-server ports the frontend might use
+# CORS — Vite localhost + *.vercel.app production frontends calling this API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:5173",   # default Vite port (and the one you specified)
-        "http://localhost:5174",   # Vite fallback ports
+        "http://localhost:5173",
+        "http://localhost:5174",
         "http://localhost:5175",
         "http://localhost:5176",
     ],
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -194,6 +255,33 @@ def _by_element(rows: list) -> dict[int, dict]:
 
 _cache: dict[str, Any] = {"key": None, "result": None, "ts": 0.0}
 
+
+def _invalidate_agent_cache() -> None:
+    """Clear in-memory stats payload so the next request re-runs the graph."""
+    _cache["key"] = None
+    _cache["result"] = None
+    _cache["ts"] = 0.0
+
+
+def _maybe_refresh_csv_before_agent() -> None:
+    """
+    Cheap ingest check before each stats run (bootstrap + CSV max vs latest finished GW).
+    Skips heavy work when already current. Disable with SKIP_FPL_CSV_REFRESH=1.
+
+    AUTO_REFRESH_FPL_DATA=1 additionally starts the periodic sweep in lifespan — unrelated
+    to this hook except both use update_data.maybe_refresh_processed_csv.
+    """
+    if _truthy_env("SKIP_FPL_CSV_REFRESH"):
+        return
+    try:
+        import update_data
+
+        if update_data.maybe_refresh_processed_csv(False):
+            _invalidate_agent_cache()
+    except Exception:
+        pass
+
+
 # Maximum age of a cached result in seconds.
 # 3600 s = 1 hour.  After this the graph re-runs even for the same GW,
 # which picks up any live bootstrap changes (injury updates etc.).
@@ -201,10 +289,10 @@ _CACHE_TTL = 3600
 
 # Bump when the /api/stats response schema changes so stale cached payloads
 # (e.g. missing actual_points) are not served.
-_CACHE_SCHEMA_VER = "20250414a"
+_CACHE_SCHEMA_VER = "20260206b"
 
 
-def _get_or_run_agent(season: str, gameweek: int | None) -> dict:
+def _get_or_run_agent(season: str | None, gameweek: int | None) -> dict:
     """
     Return a cached agent result if available and fresh, otherwise run the
     full graph and cache the result.
@@ -212,7 +300,7 @@ def _get_or_run_agent(season: str, gameweek: int | None) -> dict:
     Parameters
     ----------
     season   : FPL season string, e.g. "2024-25"
-    gameweek : Target GW number, or None (agent will auto-detect latest).
+    gameweek : Target GW number, or None → resolved via _resolve_agent_gameweek()
 
     Returns
     -------
@@ -224,7 +312,9 @@ def _get_or_run_agent(season: str, gameweek: int | None) -> dict:
     HTTPException(502)
         If the graph returns an error (e.g. FPL API unreachable, missing model).
     """
-    cache_key = f"{_CACHE_SCHEMA_VER}__{season}__{gameweek}"
+    _maybe_refresh_csv_before_agent()
+    gw_eff = _resolve_agent_gameweek(gameweek)
+    cache_key = f"{_CACHE_SCHEMA_VER}__{season}__{gw_eff}"
     now = time.time()
 
     # Cache hit: same season+GW and result is still within TTL
@@ -237,7 +327,7 @@ def _get_or_run_agent(season: str, gameweek: int | None) -> dict:
 
     # Cache miss: run the full 8-node LangGraph pipeline.
     # run_stats_agent() builds the StatsAgentState dict and calls graph.invoke().
-    result = run_stats_agent(gameweek=gameweek, season=season)
+    result = run_stats_agent(gameweek=gw_eff, season=season)
 
     if result.get("error"):
         # Surface graph-level errors as 502 Bad Gateway so the client knows
@@ -317,13 +407,107 @@ def health():
     return {"status": "ok", "port": 8006}
 
 
+@app.get("/api/data/meta")
+def data_csv_meta():
+    """
+    Fast snapshot of merged dataset on disk (+ FPL bootstrap latest finished GW).
+    Use to verify deployed API / image has the CSV you expect (no full agent run).
+    """
+    try:
+        st = os.stat(PROCESSED_CSV)
+        mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+        df = pd.read_csv(PROCESSED_CSV, usecols=["season", "GW"])
+        by_season: dict[str, dict[str, int]] = {}
+        for season in df["season"].unique():
+            sub = df.loc[df["season"].astype(str) == str(season), "GW"]
+            by_season[str(season)] = {
+                "gw_min": int(sub.min()),
+                "gw_max": int(sub.max()),
+            }
+        fpl_finished: int | None = None
+        try:
+            r = requests.get(
+                "https://fantasy.premierleague.com/api/bootstrap-static/",
+                timeout=15,
+            )
+            r.raise_for_status()
+            lx = 1
+            for ev in r.json().get("events") or []:
+                if ev.get("finished") is True:
+                    lx = int(ev["id"])
+            fpl_finished = lx
+        except Exception:
+            fpl_finished = None
+
+        return _to_json(
+            {
+                "processed_csv": "data/processed_fpl_data.csv",
+                "csv_mtime_utc": mtime,
+                "gw_range_by_season": by_season,
+                "fpl_latest_finished_gw": fpl_finished,
+                "deploy_git_sha": os.getenv("VERCEL_GIT_COMMIT_SHA")
+                or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+                or os.getenv("GIT_COMMIT"),
+            }
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"data meta: {exc}") from exc
+
+
 # ── POST /api/stats ──────────────────────────────────────────────────────────
 # Full ranked player list.  Kept for the React LoadingScreen which expects
 # the complete payload (all positions, captain shortlist, form stats).
 
 class StatsRequest(BaseModel):
-    gameweek: int | None = None   # None = auto-detect latest GW
+    gameweek: int | None = None   # None = FPL is_next (planning GW); see _resolve_agent_gameweek
     season: str | None = None     # None = auto-detect current season from CSV
+
+
+FPL_BOOTSTRAP_URL = "https://fantasy.premierleague.com/api/bootstrap-static/"
+
+
+def _get_fpl_planning_gameweek() -> int | None:
+    """
+    Fetch the 'planning' gameweek from FPL API — the upcoming deadline (is_next).
+    Falls back to is_current if is_next isn't set, or None on error.
+    """
+    try:
+        r = requests.get(FPL_BOOTSTRAP_URL, timeout=15)
+        r.raise_for_status()
+        events = r.json().get("events", [])
+        # is_next = the upcoming GW deadline (where you plan transfers)
+        next_gw = next((e for e in events if e.get("is_next")), None)
+        if next_gw:
+            return int(next_gw["id"])
+        # Fallback to is_current
+        current = next((e for e in events if e.get("is_current")), None)
+        if current:
+            return int(current["id"])
+        return None
+    except Exception:
+        return None
+
+
+def _resolve_agent_gameweek(requested: int | None) -> int | None:
+    """
+    If the client passes an explicit GW, use it. Otherwise prefer FPL ``is_next``
+    so defaults align with the deadline you're planning for (often dataset_max+1
+    in planning mode). Fallback: CSV max GW + 1 for ACTIVE_INGEST_SEASON.
+    """
+    if requested is not None:
+        return requested
+    g = _get_fpl_planning_gameweek()
+    if g is not None:
+        return g
+    try:
+        import update_data as ud
+
+        mx = ud.csv_max_gw_for_season(ud.ACTIVE_INGEST_SEASON)
+        if mx is not None:
+            return min(38, mx + 1)
+    except Exception:
+        pass
+    return None
 
 
 @app.post("/api/stats")
@@ -334,6 +518,9 @@ def get_stats(req: StatsRequest):
     Returns the complete ranked player list, captain shortlist, and form stats.
     Used by the React app's LoadingScreen → StatsScreen flow.
     """
+    # Get the FPL planning gameweek (is_next) for context
+    planning_gw = _get_fpl_planning_gameweek()
+    
     result = _get_or_run_agent(season=req.season, gameweek=req.gameweek)
 
     # Extract real injury/availability data from the cached FPL bootstrap
@@ -371,8 +558,13 @@ def get_stats(req: StatsRequest):
             "position": c.get("position") or ranked_p.get("position"),
         })
 
+    # The model uses features from the latest finished GW in the CSV.
+    # The planning_gameweek is the FPL "is_next" GW (where you set transfers).
+    model_gw = result.get("gameweek")
+    
     payload = {
-        "gameweek":               result.get("gameweek"),
+        "gameweek":               model_gw,
+        "planning_gameweek":      planning_gw,  # FPL's upcoming deadline
         "season":                 result.get("season"),
         "ranked":                 result.get("ranked", {}),
         "captain_shortlist":      enriched_captains,
@@ -704,11 +896,11 @@ def get_transfers(req: TransfersRequest):
     Response
     --------
     {
-      "gameweek": 30,
+      "gameweek": 35,
       "season": "2024-25",
       "hold_flag": false,
       "wildcard_flag": false,
-      "summary": "GW30 recommendation: Transfer ...",
+      "summary": "GW35 recommendation: Transfer ...",
       "transfers": [
         {
           "sell": { "name": "...", "position": "MID", "cost": 6.5, "expected_pts": 4.9, ... },
