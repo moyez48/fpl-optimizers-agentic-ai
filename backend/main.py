@@ -131,15 +131,21 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — Vite localhost + *.vercel.app production frontends calling this API
+# CORS — Vite localhost + *.vercel.app + optional custom domains (comma-separated)
+_default_cors = [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:5175",
+    "http://localhost:5176",
+]
+_extra = [
+    o.strip()
+    for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:5174",
-        "http://localhost:5175",
-        "http://localhost:5176",
-    ],
+    allow_origins=list(dict.fromkeys(_default_cors + _extra)),
     allow_origin_regex=r"https://.*\.vercel\.app",
     allow_methods=["*"],
     allow_headers=["*"],

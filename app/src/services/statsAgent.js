@@ -1,3 +1,5 @@
+import { backendApiUrl } from '../lib/apiOrigin.js'
+
 /**
  * statsAgent.js
  * =============
@@ -62,7 +64,7 @@ export async function fetchStats({ gameweek, season } = {}) {
   const payload = {}
   if (gameweek != null && Number.isFinite(Number(gameweek))) payload.gameweek = Number(gameweek)
   if (season != null && String(season).trim()) payload.season = String(season).trim()
-  const res = await fetch('/api/stats', {
+  const res = await fetch(backendApiUrl('/api/stats'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -152,7 +154,7 @@ export async function fetchManager({
   }
   if (gameweek != null && Number.isFinite(Number(gameweek))) payload.gameweek = Number(gameweek)
   if (season != null && String(season).trim()) payload.season = String(season).trim()
-  const res = await fetch('/api/manager', {
+  const res = await fetch(backendApiUrl('/api/manager'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -172,7 +174,7 @@ export async function fetchTransfers({ playerIds, bank = 0, freeTransfers = 1, g
   }
   if (gameweek != null && Number.isFinite(Number(gameweek))) payload.gameweek = Number(gameweek)
   if (season != null && String(season).trim()) payload.season = String(season).trim()
-  const res = await fetch('/api/transfers', {
+  const res = await fetch(backendApiUrl('/api/transfers'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),

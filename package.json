@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "type": "module",
+  "name": "fpl-optimizers-agentic-ai",
+  "description": "Monorepo root for Vercel Routing Middleware alongside Vite frontend in app/"
+}

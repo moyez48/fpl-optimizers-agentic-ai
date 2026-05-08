@@ -96,7 +96,7 @@ export default function App() {
       const rawStats = await statsPromiseRef.current
       if (!rawStats || typeof rawStats !== 'object') {
         throw new Error(
-          'No stats response from /api/stats. Start the API and check app/vite.config.js proxy (VITE_API_PROXY → your port).'
+          'No stats response from the Stats API. Local: start FastAPI and set app/.env.local VITE_API_PROXY. Production/build: set VITE_API_BASE to your FastAPI URL and redeploy.'
         )
       }
       const allRanked = rawStats.ranked?.ALL

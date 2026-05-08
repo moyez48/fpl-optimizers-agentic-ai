@@ -279,7 +279,7 @@ export default function StatsScreen({
         <div className="bg-amber/10 border border-amber/20 rounded-2xl p-6 text-center">
           <p className="text-amber font-bold text-sm">No player rows in stats payload</p>
           <p className="text-[11px] text-fpl_text/50 mt-2">
-            Restart the FastAPI server (cache clears on schema change), confirm Vite proxies to the same port (<span className="font-mono">VITE_API_PROXY</span> in <span className="font-mono">app/.env.local</span>), then run the optimizer again.
+            Restart FastAPI (cache clears on schema change). Locally, set <span className="font-mono">VITE_API_PROXY</span> in <span className="font-mono">app/.env.local</span>. On Vercel, set <span className="font-mono">VITE_API_BASE</span> (see README) and redeploy.
           </p>
         </div>
       </div>
