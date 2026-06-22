@@ -1,332 +1,887 @@
-import React, { useState, useRef, useCallback } from 'react'
-import InputScreen   from './components/screens/InputScreen'
-import LoadingScreen  from './components/screens/LoadingScreen'
-import StatsScreen    from './components/screens/StatsScreen'
-import ManagerScreen  from './components/screens/ManagerScreen'
-import Dashboard      from './components/screens/Dashboard'
+import React from 'react'
+import { pitchcraftApiUrl } from './lib/pitchcraftApi.js'
+import { buildOptimalPitchcraftSquad } from './utils/optimalXI.js'
+import { setCaptain, setViceCaptain, swapPlayers } from './utils/squadEdit.js'
+import { applySelectedTransfers } from './utils/transferApply.js'
 import {
-  fetchStats,
-  adaptToStatsOutput,
-  fetchTransfers,
-  adaptToTransferOutput,
-  fetchManager,
-  adaptToManagerOutput,
-  parseDatasetGwMaxFromStatsError,
-} from './services/statsAgent'
+  mergePlayerProjectionFields,
+  resolvePlayerXpts,
+  shouldPollLiveScores,
+} from './utils/gameweekDisplay.js'
+import {
+  PitchView,
+  BenchView,
+  BudgetBar,
+  CaptainPanel,
+  OptimizerPanel,
+  ChipPanel,
+  AllPlayersTable,
+  SquadAnalytics,
+  SquadTable,
+  PlayerStatsModal,
+  TransfersView,
+  TweaksPanel,
+  TweakSection,
+  TweakRadio,
+  TweakColor,
+  useTweaks,
+} from './pitchcraft/PitchcraftUI.jsx'
 
-// App screens in order
-const SCREENS = {
-  INPUT:    'input',
-  LOADING:  'loading',
-  STATS:    'stats',
-  MANAGER:  'manager',
-  DASHBOARD:'dashboard',
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/ {
+  theme: 'sporty',
+  accent: '#7CFF50',
+  showOptimizer: true,
+} /*EDITMODE-END*/
+
+const ROW_ORDER = ['FWD', 'MID', 'DEF', 'GKP']
+
+function flattenStartingIds(squad) {
+  const out = []
+  for (const k of ROW_ORDER) {
+    out.push(...(squad.starting?.[k] || []))
+  }
+  return out
 }
 
-const RESULT_TABS = [
-  { key: SCREENS.STATS,    label: 'Stats',    icon: '📊' },
-  { key: SCREENS.MANAGER,  label: 'Manager',  icon: '🏟️' },
-  { key: SCREENS.DASHBOARD,label: 'Dashboard',icon: '📈' },
-]
+function squadPlayerIds(squad) {
+  const xi = flattenStartingIds(squad)
+  return [...xi, ...(squad.bench || [])].slice(0, 15)
+}
+
+const EMPTY_SQUAD = {
+  starting: { GKP: [], DEF: [], MID: [], FWD: [] },
+  bench: [],
+  captain: null,
+  vice: null,
+}
+
+function deepClone(value) {
+  try {
+    return structuredClone(value)
+  } catch {
+    return JSON.parse(JSON.stringify(value))
+  }
+}
+
+function cloneSquad(squad) {
+  return deepClone(squad)
+}
+
+function squadsEqual(a, b) {
+  return JSON.stringify(cloneSquad(a)) === JSON.stringify(cloneSquad(b))
+}
+
+function squadPoolFromSquad(squad, players) {
+  const ids = new Set(squadPlayerIds(squad))
+  return players.filter((p) => ids.has(p.id))
+}
+
+// FPL element_type integers → Pitchcraft grid rows.
+const ELEMENT_TYPE_TO_POS = { 1: 'GKP', 2: 'DEF', 3: 'MID', 4: 'FWD' }
+
+// Map a raw backend player onto the keys the Pitchcraft UI renders.
+// Backend may use FPL-native keys (web_name, element_type, predicted_points)
+// or already-normalised ones (name, position, xPts) — handle both.
+function normalizePlayer(raw) {
+  const rawPos = raw.position ?? raw.element_type
+  let position
+  if (typeof rawPos === 'number') {
+    position = ELEMENT_TYPE_TO_POS[rawPos] ?? 'MID'
+  } else if (rawPos === 'GK') {
+    position = 'GKP'
+  } else {
+    position = ELEMENT_TYPE_TO_POS[rawPos] ?? rawPos ?? 'MID'
+  }
+  const xp = resolvePlayerXpts(raw)
+  const price = raw.price ?? (raw.now_cost != null ? raw.now_cost / 10 : 0)
+  const webName = raw.web_name ?? raw.name ?? 'Unknown'
+  return {
+    ...raw,
+    id: raw.id ?? raw.element ?? raw.player_id,
+    name: webName,
+    web_name: webName,
+    element_type: raw.element_type ?? rawPos,
+    team_code: raw.team_code ?? null,
+    position,
+    xp,
+    xPts: xp,
+    price,
+  }
+}
+
+// Build a Pitchcraft squad object from a flat, normalised player pool when the
+// backend returns only a list. Best xPts per line start; rest go to the bench.
+function buildSquadFromPlayers(pool) {
+  const byPos = { GKP: [], DEF: [], MID: [], FWD: [] }
+  for (const p of pool) (byPos[p.position] || (byPos[p.position] = [])).push(p)
+  for (const k of Object.keys(byPos)) {
+    byPos[k].sort((a, b) => (b.xp ?? 0) - (a.xp ?? 0))
+  }
+  const want = { GKP: 1, DEF: 4, MID: 4, FWD: 2 }
+  const starting = { GKP: [], DEF: [], MID: [], FWD: [] }
+  const bench = []
+  for (const k of ROW_ORDER.slice().reverse()) {
+    const ids = (byPos[k] || []).map((p) => p.id)
+    starting[k] = ids.slice(0, want[k] ?? 0)
+    bench.push(...ids.slice(want[k] ?? 0))
+  }
+  const xiIds = ['GKP', 'DEF', 'MID', 'FWD'].flatMap((k) => starting[k])
+  const captain =
+    xiIds
+      .map((id) => pool.find((p) => p.id === id))
+      .filter(Boolean)
+      .sort((a, b) => (b.xp ?? 0) - (a.xp ?? 0))[0]?.id ?? null
+  return { starting, bench, captain, vice: null }
+}
 
 export default function App() {
-  const [screen, setScreen] = useState(SCREENS.INPUT)
-  const [userInput, setUserInput] = useState(null)
-  const [agentData, setAgentData] = useState(null)
-  const [agentError, setAgentError] = useState(null)
-  const [statsGwLoading, setStatsGwLoading] = useState(false)
-  const [agentWarning, setAgentWarning] = useState(null)
-  /** Upper GW bound for the CSV/model (from API or inferred when a bad GW request fails). */
-  const [gwDatasetCap, setGwDatasetCap] = useState(null)
+  const [t, setTweak] = useTweaks(TWEAK_DEFAULTS)
+  const [actualSquad, setActualSquad] = React.useState(EMPTY_SQUAD)
+  const [actualPlayers, setActualPlayers] = React.useState([])
+  const [displaySquad, setDisplaySquad] = React.useState(EMPTY_SQUAD)
+  const [stagedTransfers, setStagedTransfers] = React.useState([])
+  const [isSimulationMode, setIsSimulationMode] = React.useState(false)
+  const [currentActiveGw, setCurrentActiveGw] = React.useState(null)
+  const [players, setPlayers] = React.useState([])
+  const [bankRemaining, setBankRemaining] = React.useState(0.5)
+  const [freeTransfers, setFreeTransfers] = React.useState(1)
+  const [availableChips, setAvailableChips] = React.useState([])
+  const [gwMeta, setGwMeta] = React.useState({ gameweek: null, season: null })
+  const [overallRank, setOverallRank] = React.useState(null)
+  const [managerInitials, setManagerInitials] = React.useState('FC')
+  const [xferPayload, setXferPayload] = React.useState(null)
+  const [squadStats, setSquadStats] = React.useState(null)
+  const [fplId, setFplId] = React.useState('')
+  const [selectedGw, setSelectedGw] = React.useState(null)
+  const [squadLayoutKey, setSquadLayoutKey] = React.useState(0)
 
-  /** Highest GW selectable in Stats picker — max(csv_max+1, FPL planning GW), capped at 38. */
-  const planningSelectableMax = useCallback((datasetMaxLike, planningGwLike) => {
-    const dm = Number(datasetMaxLike)
-    const pg = Number(planningGwLike)
-    const candidates = []
-    if (Number.isFinite(dm)) candidates.push(Math.min(38, dm + 1))
-    if (Number.isFinite(pg)) candidates.push(Math.min(38, pg))
-    if (candidates.length === 0) return 38
-    return Math.min(38, Math.max(...candidates))
+  const [squadLoading, setSquadLoading] = React.useState(false)
+  const [squadError, setSquadError] = React.useState(null)
+
+  const [allPlayers, setAllPlayers] = React.useState([])
+  const [allPlayersLoading, setAllPlayersLoading] = React.useState(true)
+  const [allPlayersError, setAllPlayersError] = React.useState(null)
+  const [selectedTeam, setSelectedTeam] = React.useState('ALL')
+  const [sortConfig, setSortConfig] = React.useState({
+    key: 'total_points',
+    direction: 'desc',
+  })
+
+  const [selectedPlayer, setSelectedPlayer] = React.useState(null)
+  const [view, setView] = React.useState('squad')
+  const [optimRunning, setOptimRunning] = React.useState(false)
+  const [optimError, setOptimError] = React.useState(null)
+
+  const [isEditMode, setIsEditMode] = React.useState(false)
+  const [activeEditPlayer, setActiveEditPlayer] = React.useState(null)
+  const [swapSourceId, setSwapSourceId] = React.useState(null)
+  const [hasManualEdits, setHasManualEdits] = React.useState(false)
+
+  // Fetch a manager's squad from the hosted backend by FPL ID.
+  // Hits ${VITE_API_BASE}/api/squad/<fpl_id>; maps backend keys → UI state.
+  const fetchManagerSquad = React.useCallback(async (id, gw = null) => {
+    const clean = String(id ?? '').trim()
+    if (!clean) return
+    setSquadLoading(true)
+    setSquadError(null)
+    try {
+      const qs = gw != null ? `?gw=${encodeURIComponent(gw)}` : ''
+      const url = pitchcraftApiUrl(`/api/squad/${encodeURIComponent(clean)}${qs}`)
+      const res = await fetch(url)
+      if (!res.ok) {
+        const msg = await res.text().catch(() => '')
+        throw new Error(msg || `Squad HTTP ${res.status}`)
+      }
+      const data = await res.json()
+      // Backend may return a bare player list or an envelope {squad, players, …}.
+      const rawList = Array.isArray(data) ? data : data.players || []
+      const pool = rawList.map(normalizePlayer).filter((p) => p.id != null)
+      const frozenPool = deepClone(pool.map((p) => mergePlayerProjectionFields(p)))
+      setActualPlayers(frozenPool)
+      setPlayers(deepClone(frozenPool))
+      let activeGw = null
+      let viewGw = gw != null ? Number(gw) : null
+      if (!Array.isArray(data)) {
+        if (typeof data.bank === 'number') setBankRemaining(data.bank)
+        if (typeof data.available_free_transfers === 'number') {
+          setFreeTransfers(data.available_free_transfers)
+        } else if (typeof data.free_transfers === 'number') {
+          setFreeTransfers(data.free_transfers)
+        }
+        if (Array.isArray(data.available_chips)) setAvailableChips(data.available_chips)
+        setGwMeta({ gameweek: data.gameweek ?? null, season: data.season ?? null })
+        setOverallRank(data.overall_rank ?? null)
+        if (data.manager_initials) setManagerInitials(data.manager_initials)
+        setSquadStats(data.squad_stats || null)
+        activeGw =
+          data.current_active_gw != null ? Number(data.current_active_gw) : null
+        if (data.picks_gameweek != null) {
+          viewGw = Number(data.picks_gameweek)
+          setSelectedGw(viewGw)
+        }
+      }
+      const resolvedActiveGw = activeGw ?? viewGw
+      setCurrentActiveGw(resolvedActiveGw)
+      const optimalSquad = buildOptimalPitchcraftSquad(pool)
+      const sourceSquad = deepClone(optimalSquad || EMPTY_SQUAD)
+      setActualSquad(deepClone(sourceSquad))
+      setDisplaySquad(deepClone(sourceSquad))
+      setStagedTransfers([])
+      setIsSimulationMode(false)
+      setSquadLayoutKey((k) => k + 1)
+      setIsEditMode(false)
+      setActiveEditPlayer(null)
+      setSwapSourceId(null)
+      setHasManualEdits(false)
+      setSelectedPlayer(null)
+      setXferPayload(null)
+    } catch (e) {
+      console.error('[fetchManagerSquad] failed:', e)
+      setSquadError(e.message || String(e))
+    } finally {
+      setSquadLoading(false)
+    }
   }, [])
 
-  // Holds the in-flight API promises so LoadingScreen can await them
-  const statsPromiseRef     = useRef(null)
-  const transfersPromiseRef = useRef(null)
-  const managerPromiseRef   = useRef(null)
-  const userInputRef        = useRef(null)
-
-  const handleRun = (input) => {
-    setUserInput(input)
-    userInputRef.current = input
-    setAgentData(null)
-    setAgentError(null)
-    setAgentWarning(null)
-    setGwDatasetCap(null)
-
-    // Omit gameweek on first load — backend resolves FPL is_next after optional CSV refresh.
-    statsPromiseRef.current = fetchStats({})
-
-    // Kick off Sporting Director call only when the user has a real FPL squad
-    // (demo/fake player IDs won't match FPL element IDs in the dataset)
-    if (input.isLiveData && input.squadIds?.length === 15) {
-      transfersPromiseRef.current = fetchTransfers({
-        playerIds:     input.squadIds,
-        bank:          input.bank ?? 0,
-        freeTransfers: input.freeTransfers ?? 1,
+  React.useEffect(() => {
+    let cancelled = false
+    setAllPlayersLoading(true)
+    setAllPlayersError(null)
+    const params = new URLSearchParams()
+    if (selectedGw != null) params.set('gw', String(selectedGw))
+    if (gwMeta.season) params.set('season', gwMeta.season)
+    const qs = params.toString() ? `?${params.toString()}` : ''
+    fetch(pitchcraftApiUrl(`/api/players${qs}`))
+      .then((res) => {
+        if (!res.ok) throw new Error(`Players HTTP ${res.status}`)
+        return res.json()
       })
-      managerPromiseRef.current = fetchManager({
-        playerIds:     input.squadIds,
-        bank:          input.bank ?? 0,
-        tripleCaptain: input.chips?.tripleCaptain ?? true,
-        benchBoost:    input.chips?.benchBoost ?? true,
+      .then((data) => {
+        if (cancelled) return
+        const raw = Array.isArray(data) ? data : data.players || []
+        setAllPlayers(
+          raw.map((p) => ({
+            ...normalizePlayer(p),
+            first_name: p.first_name ?? '',
+            second_name: p.second_name ?? '',
+            team: p.team ?? '',
+            total_points: p.total_points ?? 0,
+            form: p.form ?? '—',
+            ep_next: p.ep_next,
+            ep_this: p.ep_this,
+            xg: p.xg,
+            xa: p.xa,
+            xga: p.xga,
+            teamShort: p.teamShort,
+            prediction_gw: p.prediction_gw ?? data.gameweek ?? selectedGw,
+            xpts_source: p.xpts_source,
+            gw_pts: p.gw_pts ?? p.gw_points ?? null,
+            gw_points: p.gw_points ?? p.gw_pts ?? null,
+          })),
+        )
       })
-    } else {
-      transfersPromiseRef.current = null
-      managerPromiseRef.current = null
+      .catch((e) => {
+        if (!cancelled) setAllPlayersError(e.message || String(e))
+      })
+      .finally(() => {
+        if (!cancelled) setAllPlayersLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [selectedGw, gwMeta.season])
+
+  // Step to a specific historical gameweek (re-fetches that GW's lineup).
+  const goToGameweek = React.useCallback(
+    (gw) => {
+      if (!fplId.trim() || gw == null) return
+      setSelectedGw(gw)
+      fetchManagerSquad(fplId, gw)
+    },
+    [fplId, fetchManagerSquad],
+  )
+
+  // Optional convenience bootstrap: auto-load when a VITE_FPL_ENTRY_ID is baked
+  // into the env. Otherwise we wait for the user to enter an ID + click Load Team.
+  React.useEffect(() => {
+    const entry = import.meta.env.VITE_FPL_ENTRY_ID
+    if (entry) {
+      setFplId(String(entry))
+      fetchManagerSquad(String(entry))
+    }
+  }, [fetchManagerSquad])
+
+  React.useEffect(() => {
+    setIsSimulationMode(
+      !squadsEqual(displaySquad, actualSquad) || stagedTransfers.length > 0,
+    )
+  }, [displaySquad, actualSquad, stagedTransfers])
+
+  // Live gw_pts refresh for the active gameweek (FPL /event/{gw}/live/).
+  React.useEffect(() => {
+    if (!shouldPollLiveScores(selectedGw, currentActiveGw)) return undefined
+    let cancelled = false
+
+    const refreshLiveScores = () => {
+      fetch(pitchcraftApiUrl(`/api/event/${encodeURIComponent(selectedGw)}/live-points`))
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (cancelled || !data?.points) return
+          const liveMap = data.points
+          setPlayers((prev) =>
+            prev.map((p) => {
+              const pts = liveMap[String(p.id)] ?? liveMap[p.id]
+              if (pts == null) return p
+              return { ...p, gw_points: Number(pts), gw_pts: Number(pts) }
+            }),
+          )
+        })
+        .catch(() => {})
     }
 
-    setScreen(SCREENS.LOADING)
-  }
-
-  // Called by LoadingScreen when its animation finishes.
-  // Awaits both API promises so the screen only advances once all data is ready.
-  const handleLoadingComplete = async () => {
-    try {
-      const rawStats = await statsPromiseRef.current
-      if (!rawStats || typeof rawStats !== 'object') {
-        throw new Error(
-          'No stats response from the Stats API. Local: start FastAPI and set app/.env.local VITE_API_PROXY. Production/build: set VITE_API_BASE to your FastAPI URL and redeploy.'
-        )
-      }
-      const allRanked = rawStats.ranked?.ALL
-      if (!Array.isArray(allRanked) || allRanked.length === 0) {
-        throw new Error(
-          'Stats API returned no players (ranked.ALL is empty). Restart uvicorn so the cache resets (schema bump) and try again.'
-        )
-      }
-      const squadIds = userInputRef.current?.isLiveData ? userInputRef.current?.squadIds : null
-      const adapted = adaptToStatsOutput(rawStats, squadIds)
-
-      // Transfers are optional — don't fail the whole pipeline if they error
-      if (transfersPromiseRef.current) {
-        try {
-          const rawTransfers = await transfersPromiseRef.current
-          adapted.transferRecommendation = adaptToTransferOutput(rawTransfers)
-        } catch (_transferErr) {
-          // Transfers failed but stats succeeded — continue without them
-        }
-      }
-
-      if (managerPromiseRef.current) {
-        try {
-          const rawManager = await managerPromiseRef.current
-          adapted.managerRecommendation = adaptToManagerOutput(rawManager)
-        } catch (_mgrErr) {
-          // Manager agent optional if it errors independently
-        }
-      }
-
-      if (adapted.transferRecommendation?.planningGameweek != null) {
-        adapted.planningGameweek = adapted.transferRecommendation.planningGameweek
-      }
-
-      if (adapted.datasetMaxGw != null) {
-        setGwDatasetCap(adapted.datasetMaxGw)
-      }
-      setAgentWarning(adapted.gwFallbackWarning ?? null)
-      setAgentData(adapted)
-    } catch (err) {
-      setAgentError(err.message ?? String(err))
+    refreshLiveScores()
+    const timer = window.setInterval(refreshLiveScores, 60_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
     }
-    setScreen(SCREENS.STATS)
+  }, [selectedGw, currentActiveGw])
+
+  const allStartingIds = flattenStartingIds(displaySquad)
+  const squadIds = new Set([...allStartingIds, ...(displaySquad.bench || [])])
+  const squadEmpty = squadIds.size === 0
+
+  const totalCost = [...allStartingIds, ...(displaySquad.bench || [])]
+    .map((id) => players.find((p) => p.id === id))
+    .filter(Boolean)
+    .reduce((s, p) => s + (p.price || 0), 0)
+
+  const totalXp = allStartingIds
+    .map((id) => players.find((p) => p.id === id))
+    .filter(Boolean)
+    .reduce((s, p) => {
+      const pts = p.xp ?? p.xPts ?? 0
+      return s + (p.id === displaySquad.captain ? pts * 2 : pts)
+    }, 0)
+
+  const playersById = React.useMemo(() => {
+    const m = new Map()
+    for (const p of players) m.set(p.id, p)
+    return m
+  }, [players])
+
+  const clearEditUi = () => {
+    setActiveEditPlayer(null)
+    setSwapSourceId(null)
   }
 
-  const handleReset = () => {
-    setScreen(SCREENS.INPUT)
-    setUserInput(null)
-    setAgentData(null)
-    setAgentError(null)
-    setAgentWarning(null)
-    setStatsGwLoading(false)
-    setGwDatasetCap(null)
+  const applySquadChange = (next) => {
+    if (!squadsEqual(next, displaySquad)) {
+      setDisplaySquad(deepClone(next))
+      setHasManualEdits(true)
+    }
   }
 
-  const handleStatsGameweekChange = useCallback(async (gw) => {
-    const ui = userInputRef.current
-    if (!ui || gw == null || Number.isNaN(Number(gw))) return
-    const g = Number(gw)
-    const datasetMax = gwDatasetCap ?? agentData?.datasetMaxGw
-    const planningMax = planningSelectableMax(datasetMax ?? null, agentData?.planningGameweek ?? null)
-    if (planningMax != null && g > planningMax) {
-      setAgentError(
-        `GW${g} is not available yet (planning range: GW1–GW${planningMax}; data through GW${datasetMax ?? '—'}). Refresh data if stuck.`,
-      )
+  const handleRevertSquad = () => {
+    setPlayers(deepClone(actualPlayers).map((p) => mergePlayerProjectionFields(p)))
+    setDisplaySquad(deepClone(actualSquad))
+    setStagedTransfers([])
+    setXferPayload(null)
+    setHasManualEdits(false)
+    setIsSimulationMode(false)
+    setIsEditMode(false)
+    clearEditUi()
+    setSelectedPlayer(null)
+    setSquadLayoutKey((k) => k + 1)
+  }
+
+  const handlePlayerClick = (p, zone = null) => {
+    if (!isEditMode) {
+      setSelectedPlayer(p)
       return
     }
-    setStatsGwLoading(true)
-    setAgentError(null)
-    try {
-      const rawStats = await fetchStats({ gameweek: g })
-      const allRanked = rawStats.ranked?.ALL
-      if (!Array.isArray(allRanked) || allRanked.length === 0) {
-        throw new Error(
-          rawStats.detail || `No model rows for GW${g}. Pick GW1–GW${planningMax ?? '?'}.`,
-        )
-      }
-      const squadIds = ui.isLiveData ? ui.squadIds : null
-      let adapted = adaptToStatsOutput(rawStats, squadIds)
 
-      if (ui.isLiveData && ui.squadIds?.length === 15) {
-        try {
-          const [rawTransfers, rawManager] = await Promise.all([
-            fetchTransfers({
-              playerIds: ui.squadIds,
-              bank: ui.bank ?? 0,
-              freeTransfers: ui.freeTransfers ?? 1,
-              gameweek: g,
-            }),
-            fetchManager({
-              playerIds: ui.squadIds,
-              bank: ui.bank ?? 0,
-              gameweek: g,
-              tripleCaptain: ui.chips?.tripleCaptain ?? true,
-              benchBoost: ui.chips?.benchBoost ?? true,
-            }),
-          ])
-          adapted.transferRecommendation = adaptToTransferOutput(rawTransfers)
-          adapted.managerRecommendation = adaptToManagerOutput(rawManager)
-          if (adapted.transferRecommendation?.planningGameweek != null) {
-            adapted.planningGameweek = adapted.transferRecommendation.planningGameweek
-          }
-        } catch (_e) {
-          /* keep stats-only */
-        }
+    if (swapSourceId != null) {
+      if (p.id !== swapSourceId) {
+        applySquadChange(swapPlayers(displaySquad, swapSourceId, p.id, playersById))
       }
-
-      if (adapted.datasetMaxGw != null) {
-        setGwDatasetCap(adapted.datasetMaxGw)
-      }
-      setAgentWarning(adapted.gwFallbackWarning ?? null)
-      setAgentData(adapted)
-    } catch (err) {
-      const msg = err.message ?? String(err)
-      const inferred = parseDatasetGwMaxFromStatsError(msg)
-      if (inferred != null) {
-        setGwDatasetCap((prev) => Math.max(prev ?? 0, inferred))
-      }
-      setAgentError(msg)
-    } finally {
-      setStatsGwLoading(false)
+      clearEditUi()
+      return
     }
-  }, [agentData?.datasetMaxGw, agentData?.gameweek, agentData?.planningGameweek, gwDatasetCap, planningSelectableMax])
 
-  const isResultScreen = [SCREENS.STATS, SCREENS.MANAGER, SCREENS.DASHBOARD].includes(screen)
+    if (zone === 'pitch') {
+      setActiveEditPlayer(p)
+    }
+  }
 
-  /** Single GW for nav, tabs, Stats header, picker — whatever the Stats API last succeeded with. */
-  const selectedGw = agentData?.gameweek ?? null
+  const handleSetCaptain = (playerId) => {
+    applySquadChange(setCaptain(displaySquad, playerId))
+    clearEditUi()
+  }
+
+  const handleSetVice = (playerId) => {
+    applySquadChange(setViceCaptain(displaySquad, playerId))
+    clearEditUi()
+  }
+
+  const handleStartSwap = (playerId) => {
+    setSwapSourceId(playerId)
+    setActiveEditPlayer(null)
+  }
+
+  const handleToggleEditMode = () => {
+    setIsEditMode((on) => !on)
+    clearEditUi()
+    setSelectedPlayer(null)
+  }
+
+  const handleRunOptim = async () => {
+    const ids = squadPlayerIds(displaySquad)
+    if (!fplId.trim() && ids.length !== 15) {
+      setOptimError('Load a team (FPL ID) or fill all 15 squad slots before optimising.')
+      return
+    }
+    setOptimRunning(true)
+    setOptimError(null)
+    try {
+      const res = await fetch(pitchcraftApiUrl('/api/optimize'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fpl_id: fplId.trim() || undefined,
+          player_ids: ids,
+          bank: bankRemaining,
+          free_transfers: freeTransfers,
+          gameweek: gwMeta.gameweek ?? undefined,
+          season: gwMeta.season ?? undefined,
+        }),
+      })
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '')
+        throw new Error(txt || `Optimize HTTP ${res.status}`)
+      }
+      const data = await res.json()
+      // Optimised player pool / lineup may come back with native backend keys.
+      const optimisedPool = Array.isArray(data.players)
+        ? data.players.map(normalizePlayer).filter((p) => p.id != null)
+        : Array.isArray(data.lineup)
+          ? data.lineup.map(normalizePlayer).filter((p) => p.id != null)
+          : null
+      if (optimisedPool) setPlayers(optimisedPool)
+      const optimisedSquad =
+        data.squad || (optimisedPool ? buildSquadFromPlayers(optimisedPool) : null)
+      setDisplaySquad(deepClone(optimisedSquad || displaySquad))
+      const xfer = data.transfers || null
+      setXferPayload(xfer)
+      setStagedTransfers(xfer?.transfers || [])
+      if (typeof data.available_free_transfers === 'number') {
+        setFreeTransfers(data.available_free_transfers)
+      } else if (typeof xfer?.available_free_transfers === 'number') {
+        setFreeTransfers(xfer.available_free_transfers)
+      }
+      if (Array.isArray(data.available_chips)) {
+        setAvailableChips(data.available_chips)
+      } else if (Array.isArray(xfer?.available_chips)) {
+        setAvailableChips(xfer.available_chips)
+      }
+      setHasManualEdits(false)
+      setIsEditMode(false)
+      clearEditUi()
+      if (typeof data.bank === 'number') setBankRemaining(data.bank)
+      setGwMeta({
+        gameweek: data.gameweek ?? gwMeta.gameweek,
+        season: data.season ?? gwMeta.season,
+      })
+      setView('transfers')
+    } catch (e) {
+      setOptimError(e.message || String(e))
+    } finally {
+      setOptimRunning(false)
+    }
+  }
+
+  const gwLabel =
+    gwMeta.gameweek != null && gwMeta.season
+      ? `${gwMeta.season} · GW${gwMeta.gameweek}`
+      : 'FPL Optimizer'
+
+  const resolveBuyPlayer = React.useCallback(
+    (buyId, buyMeta) => {
+      const targetId = Number(buyId)
+      const fromGlobal = allPlayers.find((p) => Number(p.id) === targetId)
+      const fromSquad = players.find((p) => Number(p.id) === targetId)
+      if (fromGlobal) {
+        return mergePlayerProjectionFields(fromGlobal)
+      }
+      if (fromSquad) {
+        return mergePlayerProjectionFields(fromSquad)
+      }
+      if (!buyMeta) return null
+      return mergePlayerProjectionFields(
+        normalizePlayer({
+          id: buyId,
+          element: buyId,
+          web_name: buyMeta.name,
+          name: buyMeta.name,
+          position: buyMeta.position,
+          element_type: buyMeta.position,
+          expected_pts: buyMeta.expected_pts,
+          predicted_points: buyMeta.expected_pts ?? buyMeta.xp,
+          xPts: buyMeta.expected_pts ?? buyMeta.xp,
+          ep_next: buyMeta.ep_next,
+          price: buyMeta.cost ?? buyMeta.price,
+          team: buyMeta.team,
+          teamShort: buyMeta.team,
+        }),
+      )
+    },
+    [players, allPlayers],
+  )
+
+  const handleApplyTransfers = React.useCallback(
+    ({ selectedTransfers, activeChip }) => {
+      if (!selectedTransfers?.length) return
+      const { squad, players: nextPool } = applySelectedTransfers({
+        players: deepClone(players),
+        selectedTransfers,
+        resolveBuyPlayer,
+      })
+      const sandboxPlayers = nextPool.map((p) => mergePlayerProjectionFields(p))
+      setPlayers(sandboxPlayers)
+      setDisplaySquad(deepClone(squad))
+      setStagedTransfers(selectedTransfers)
+      setHasManualEdits(false)
+      setIsEditMode(false)
+      clearEditUi()
+      setSelectedPlayer(null)
+      setSquadLayoutKey((k) => k + 1)
+      if (activeChip) {
+        setXferPayload((prev) => (prev ? { ...prev, active_chip: activeChip } : prev))
+      }
+      setView('squad')
+    },
+    [players, resolveBuyPlayer, clearEditUi],
+  )
+
+  const handleSortHeader = React.useCallback((key) => {
+    setSortConfig((prev) => {
+      if (prev.key === key) {
+        return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
+      }
+      return { key, direction: key === 'name' ? 'asc' : 'desc' }
+    })
+  }, [])
 
   return (
-    <div className="min-h-screen bg-background flex flex-col">
-      {/* ── Top nav bar ────────────────────────────────────────────────── */}
-      <header className="sticky top-0 z-40 bg-surface/80 backdrop-blur border-b border-white/5">
-        <div className="max-w-lg mx-auto px-4 h-14 flex items-center justify-between">
-          {/* Logo */}
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-lg bg-primary flex items-center justify-center">
-              <span className="text-background text-sm font-black">F</span>
-            </div>
-            <span className="font-black text-fpl_text text-sm tracking-tight">FPL Optimizer</span>
-          </div>
+    <div className={`app app-${t.theme}`} style={{ '--accent': t.accent }}>
+      <Header
+        view={view}
+        setView={setView}
+        totalXp={totalXp}
+        theme={t.theme}
+        gwLabel={gwLabel}
+        overallRank={overallRank}
+        initials={managerInitials}
+        fplId={fplId}
+        setFplId={setFplId}
+        onLoadTeam={() => fetchManagerSquad(fplId)}
+        loading={squadLoading}
+        selectedGw={selectedGw}
+        onGwChange={goToGameweek}
+        isSimulationMode={isSimulationMode}
+      />
 
-          {/* GW badge */}
-          <div className="flex items-center gap-2">
-            {selectedGw != null && (
-              <span className="text-[10px] font-bold text-primary/70 bg-primary/10 px-2 py-1 rounded-lg border border-primary/20">
-                GW{selectedGw}
-              </span>
-            )}
-            {screen !== SCREENS.INPUT && screen !== SCREENS.LOADING && (
-              <button
-                onClick={handleReset}
-                className="text-[10px] text-fpl_text/30 hover:text-fpl_text transition-colors"
-              >
-                ← New squad
-              </button>
-            )}
-          </div>
+      {squadLoading && (
+        <div className="pc-loading" role="status">
+          Loading squad & model projections…
         </div>
-      </header>
+      )}
+      {squadError && (
+        <div className="pc-banner" role="alert">
+          Couldn’t load squad — {squadError}
+        </div>
+      )}
 
-      {/* ── Step indicator (INPUT + LOADING only) ──────────────────────── */}
-      {(screen === SCREENS.INPUT || screen === SCREENS.LOADING) && (
-        <div className="bg-surface border-b border-white/5">
-          <div className="max-w-lg mx-auto px-4 py-2 flex items-center gap-2">
-            {[
-              { label: '1. Squad Setup',  active: screen === SCREENS.INPUT   },
-              { label: '2. Processing',   active: screen === SCREENS.LOADING },
-              { label: '3. Results',      active: false },
-            ].map((step, i, arr) => (
-              <React.Fragment key={step.label}>
-                <span className={`text-[10px] font-semibold whitespace-nowrap ${step.active ? 'text-primary' : 'text-fpl_text/20'}`}>
-                  {step.label}
-                </span>
-                {i < arr.length - 1 && <span className="text-fpl_text/10 text-[10px]">›</span>}
-              </React.Fragment>
-            ))}
+      {view === 'squad' && (
+        <div className="layout">
+          <div className={`col col-pitch${isSimulationMode ? ' col-pitch-sim' : ''}`}>
+            {squadEmpty && !squadLoading ? (
+              <div className="pc-empty">
+                <p className="pc-empty-msg">
+                  Enter your FPL ID and click Load Team to view your squad.
+                </p>
+              </div>
+            ) : (
+              <>
+                <PitchView
+                  squad={displaySquad}
+                  players={players}
+                  selectedGw={selectedGw}
+                  currentActiveGw={currentActiveGw}
+                  onPlayerClick={handlePlayerClick}
+                  theme={t.theme}
+                  layoutKey={squadLayoutKey}
+                  isEditMode={isEditMode}
+                  activeEditPlayer={activeEditPlayer}
+                  swapSourceId={swapSourceId}
+                  onSetCaptain={handleSetCaptain}
+                  onSetVice={handleSetVice}
+                  onStartSwap={handleStartSwap}
+                  onCancelEdit={clearEditUi}
+                  onDismissEdit={clearEditUi}
+                />
+                <BenchView
+                  squad={displaySquad}
+                  players={players}
+                  selectedGw={selectedGw}
+                  currentActiveGw={currentActiveGw}
+                  onPlayerClick={handlePlayerClick}
+                  theme={t.theme}
+                  isEditMode={isEditMode}
+                  swapSourceId={swapSourceId}
+                />
+              </>
+            )}
+          </div>
+
+          <div className="col col-side">
+            <BudgetBar
+              used={totalCost}
+              total={100.0}
+              remaining={bankRemaining}
+              theme={t.theme}
+            />
+            <CaptainPanel
+              squad={displaySquad}
+              players={players}
+              theme={t.theme}
+              selectedGw={selectedGw}
+              isEditMode={isEditMode}
+            />
+            <OptimizerPanel
+              onRun={handleRunOptim}
+              running={optimRunning}
+              theme={t.theme}
+              error={optimError}
+              isEditMode={isEditMode}
+              onToggleEdit={handleToggleEditMode}
+              hasManualEdits={hasManualEdits}
+              isSimulationMode={isSimulationMode}
+              onRevert={handleRevertSquad}
+            />
+            <ChipPanel used={[]} theme={t.theme} />
+          </div>
+
+          <div className="col col-list">
+            <SquadAnalytics stats={squadStats} theme={t.theme} />
+            {!squadEmpty && (
+              <SquadTable
+                squad={displaySquad}
+                players={players}
+                loading={squadLoading}
+                theme={t.theme}
+                onPlayerClick={handlePlayerClick}
+                selectedGw={selectedGw}
+              />
+            )}
           </div>
         </div>
       )}
 
-      {/* ── Result tab bar (STATS / MANAGER / DASHBOARD) ───────────────── */}
-      {isResultScreen && (
-        <div className="sticky top-14 z-30 bg-surface border-b border-white/5">
-          <div className="max-w-lg mx-auto px-4">
-            <div className="flex">
-              {RESULT_TABS.map(tab => (
-                <button
-                  key={tab.key}
-                  onClick={() => setScreen(tab.key)}
-                  className={`flex-1 flex items-center justify-center gap-1.5 py-3 text-xs font-semibold border-b-2 transition-all
-                    ${screen === tab.key
-                      ? 'border-primary text-primary'
-                      : 'border-transparent text-fpl_text/30 hover:text-fpl_text/60'}`}
-                >
-                  <span>{tab.icon}</span>
-                  <span>{tab.label}</span>
-                </button>
-              ))}
+      {view === 'players' && (
+        <div className="layout layout-players">
+          {allPlayersError && (
+            <div className="pc-banner" role="alert">
+              Couldn’t load player pool — {allPlayersError}
             </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Main content ───────────────────────────────────────────────── */}
-      <main className="flex-1 max-w-lg mx-auto w-full px-4 pt-4">
-        {screen === SCREENS.INPUT    && <InputScreen    onRun={handleRun} />}
-        {screen === SCREENS.LOADING  && <LoadingScreen  onComplete={handleLoadingComplete} />}
-        {screen === SCREENS.STATS    && (
-          <StatsScreen
-            agentData={agentData}
-            selectedGw={selectedGw}
-            agentError={agentError}
-            agentWarning={agentWarning}
-            userInput={userInput}
-            statsGwLoading={statsGwLoading}
-            onGameweekChange={handleStatsGameweekChange}
-            selectableGwMax={planningSelectableMax(
-              gwDatasetCap ?? agentData?.datasetMaxGw ?? null,
-              agentData?.planningGameweek ?? null,
-            )}
+          )}
+          <AllPlayersTable
+            players={allPlayers}
+            loading={allPlayersLoading}
+            theme={t.theme}
+            squadIds={squadIds}
+            onPlayerClick={setSelectedPlayer}
+            selectedTeam={selectedTeam}
+            onSelectedTeamChange={setSelectedTeam}
+            sortConfig={sortConfig}
+            onSortHeader={handleSortHeader}
           />
-        )}
-        {screen === SCREENS.MANAGER  && (
-          <ManagerScreen agentData={agentData} userInput={userInput} selectedGw={selectedGw} />
-        )}
-        {screen === SCREENS.DASHBOARD&& (
-          <Dashboard agentData={agentData} userInput={userInput} selectedGw={selectedGw} onReset={handleReset} />
-        )}
-      </main>
+        </div>
+      )}
+
+      {view === 'transfers' && (
+        <TransfersView
+          xferPayload={xferPayload}
+          theme={t.theme}
+          onClose={() => setView('squad')}
+          onApply={handleApplyTransfers}
+          availableFreeTransfers={freeTransfers}
+          availableChips={availableChips}
+        />
+      )}
+
+      {selectedPlayer && !isEditMode && (
+        <PlayerStatsModal
+          player={selectedPlayer}
+          selectedGw={selectedGw}
+          onClose={() => setSelectedPlayer(null)}
+          theme={t.theme}
+        />
+      )}
+
+      <TweaksPanel>
+        <TweakSection label="Theme" />
+        <TweakRadio
+          label="Visual style"
+          value={t.theme}
+          options={[
+            { value: 'sporty', label: 'Sporty' },
+            { value: 'terminal', label: 'Terminal' },
+            { value: 'editorial', label: 'Editorial' },
+          ]}
+          onChange={(v) => setTweak('theme', v)}
+        />
+        <TweakColor label="Accent color" value={t.accent} onChange={(v) => setTweak('accent', v)} />
+        <TweakSection label="Quick accents" />
+        <div className="twk-swatches">
+          {[
+            { c: '#7CFF50', n: 'Pitch' },
+            { c: '#FF4D4D', n: 'Heat' },
+            { c: '#3DA5FF', n: 'Sky' },
+            { c: '#FFB000', n: 'Amber' },
+            { c: '#C77DFF', n: 'Violet' },
+            { c: '#000000', n: 'Mono' },
+          ].map((sw) => (
+            <button
+              key={sw.c}
+              className="twk-sw"
+              style={{ background: sw.c }}
+              onClick={() => setTweak('accent', sw.c)}
+              title={sw.n}
+              type="button"
+            />
+          ))}
+        </div>
+      </TweaksPanel>
     </div>
+  )
+}
+
+const GW_OPTIONS = Array.from({ length: 38 }, (_, i) => i + 1)
+
+function Header({
+  view,
+  setView,
+  totalXp,
+  theme,
+  gwLabel,
+  overallRank,
+  initials,
+  fplId,
+  setFplId,
+  onLoadTeam,
+  loading,
+  selectedGw,
+  onGwChange,
+  isSimulationMode,
+}) {
+  const rankDisp =
+    overallRank != null ? Number(overallRank).toLocaleString('en-GB') : '—'
+  return (
+    <header className={`hdr hdr-${theme}`} data-screen-label="Header">
+      <div className="hdr-brand">
+        <div className="hdr-mark">
+          <span className="hdr-mark-d">▮▮▮</span>
+        </div>
+        <div className="hdr-name">
+          <div className="hdr-title">PITCHCRAFT</div>
+          <div className="hdr-sub">FPL Optimizer · {gwLabel}</div>
+        </div>
+      </div>
+      <nav className="hdr-nav">
+        <button
+          className={view === 'squad' ? 'hdr-tab on' : 'hdr-tab'}
+          onClick={() => setView('squad')}
+          type="button"
+        >
+          Squad
+        </button>
+        <button
+          className={view === 'players' ? 'hdr-tab on' : 'hdr-tab'}
+          onClick={() => setView('players')}
+          type="button"
+        >
+          Players
+        </button>
+        <button
+          className={view === 'transfers' ? 'hdr-tab on' : 'hdr-tab'}
+          onClick={() => setView('transfers')}
+          type="button"
+        >
+          Transfers
+        </button>
+      </nav>
+      {selectedGw != null && (
+        <div className="hdr-gw" role="group" aria-label="Gameweek selection">
+          <div className="hdr-gw-select-wrap">
+            <select
+              className="hdr-gw-select"
+              value={String(selectedGw)}
+              disabled={loading}
+              aria-label="Select gameweek"
+              onChange={(e) => onGwChange(Number(e.target.value))}
+            >
+              {GW_OPTIONS.map((gw) => (
+                <option key={gw} value={gw}>
+                  Gameweek {gw}
+                </option>
+              ))}
+            </select>
+            <span className="hdr-gw-chevron" aria-hidden="true">
+              ▾
+            </span>
+          </div>
+        </div>
+      )}
+      <div className="hdr-stats">
+        <div className={`hdr-stat${isSimulationMode ? ' hdr-stat-sim' : ''}`}>
+          <div className="hdr-stat-lbl">
+            {isSimulationMode ? 'Simulated GW' : 'Projected GW'}
+          </div>
+          <div className="hdr-stat-val">{totalXp.toFixed(1)}</div>
+        </div>
+        <div className="hdr-stat">
+          <div className="hdr-stat-lbl">Overall Rank</div>
+          <div className="hdr-stat-val">{rankDisp}</div>
+        </div>
+        <div className="hdr-load">
+          {initials && initials !== 'FC' && (
+            <div className="hdr-avatar" title="Loaded manager">
+              {initials}
+            </div>
+          )}
+          <input
+            className="hdr-load-input"
+            type="text"
+            inputMode="numeric"
+            placeholder="FPL ID"
+            value={fplId}
+            onChange={(e) => setFplId(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') onLoadTeam()
+            }}
+            aria-label="Manager FPL ID"
+          />
+          <button
+            className="hdr-load-btn"
+            type="button"
+            onClick={onLoadTeam}
+            disabled={loading || !fplId.trim()}
+          >
+            {loading ? '…' : 'Load Team'}
+          </button>
+        </div>
+      </div>
+    </header>
   )
 }

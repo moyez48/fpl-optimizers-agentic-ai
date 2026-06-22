@@ -1,4 +1,14 @@
-﻿# FPL Optimizer - Agentic AI Edition
+﻿---
+title: FPL Optimizer API
+emoji: ⚽
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+app_port: 7860
+---
+
+# FPL Optimizer - Agentic AI Edition
 
 > **A multi-agent AI system for the 2025-26 Fantasy Premier League season.**  
 > Built by a team of 5 developers across 9 structured weeks, progressing from statistical modelling through autonomous agents to a deployed product.
