@@ -20,4 +20,4 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.PITCHCRAFT_AI }}
         run: |
-          huggingface-cli upload moyez48/pitchcraft-api . . --repo-type=space
+          hf upload moyez48/pitchcraft-api . . --repo-type=space
