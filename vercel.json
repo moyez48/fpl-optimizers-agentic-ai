@@ -1,5 +1,5 @@
 {
-  "installCommand": "cd app && npm install --legacy-peer-deps",
-  "buildCommand": "cd app && CI=false npm run build",
-  "outputDirectory": "app/dist"
+  "installCommand": "npm install --legacy-peer-deps",
+  "buildCommand": "CI=false npm run build",
+  "outputDirectory": "dist"
 }
