@@ -1,5 +1,5 @@
 import React from 'react'
-import { pitchcraftApiUrl } from './lib/pitchcraftApi.js'
+import { pitchcraftApiUrl, squadFetchUrl } from './lib/pitchcraftApi.js'
 import { buildOptimalPitchcraftSquad } from './utils/optimalXI.js'
 import { setCaptain, setViceCaptain, swapPlayers } from './utils/squadEdit.js'
 import { applySelectedTransfers } from './utils/transferApply.js'
@@ -177,18 +177,14 @@ export default function App() {
   const [swapSourceId, setSwapSourceId] = React.useState(null)
   const [hasManualEdits, setHasManualEdits] = React.useState(false)
 
-  // Fetch a manager's squad from the hosted backend by FPL ID.
-  // Hits ${VITE_API_BASE}/api/squad?entry=<fpl_id>; maps backend keys → UI state.
+  // Backend: @app.get("/api/squad") — entry via query param (no trailing slash).
   const fetchManagerSquad = React.useCallback(async (id, gw = null) => {
     const clean = String(id ?? '').trim()
     if (!clean) return
     setSquadLoading(true)
     setSquadError(null)
     try {
-      const params = new URLSearchParams()
-      params.set('entry', clean)
-      if (gw != null) params.set('gw', String(gw))
-      const url = pitchcraftApiUrl(`/api/squad?${params.toString()}`)
+      const url = squadFetchUrl(clean, gw)
       const res = await fetch(url)
       if (!res.ok) {
         const msg = await res.text().catch(() => '')
@@ -502,11 +498,6 @@ export default function App() {
     }
   }
 
-  const gwLabel =
-    gwMeta.gameweek != null && gwMeta.season
-      ? `${gwMeta.season} · GW${gwMeta.gameweek}`
-      : 'FPL Optimizer'
-
   const resolveBuyPlayer = React.useCallback(
     (buyId, buyMeta) => {
       const targetId = Number(buyId)
@@ -581,7 +572,6 @@ export default function App() {
         setView={setView}
         totalXp={totalXp}
         theme={t.theme}
-        gwLabel={gwLabel}
         overallRank={overallRank}
         initials={managerInitials}
         fplId={fplId}
@@ -776,7 +766,6 @@ function Header({
   setView,
   totalXp,
   theme,
-  gwLabel,
   overallRank,
   initials,
   fplId,
@@ -796,8 +785,7 @@ function Header({
           <span className="hdr-mark-d">▮▮▮</span>
         </div>
         <div className="hdr-name">
-          <div className="hdr-title">PITCHCRAFT</div>
-          <div className="hdr-sub">FPL Optimizer · {gwLabel}</div>
+          <div className="hdr-title">Pitchcraft</div>
         </div>
       </div>
       <nav className="hdr-nav">

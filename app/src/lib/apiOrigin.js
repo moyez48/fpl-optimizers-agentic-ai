@@ -8,11 +8,16 @@ function stripTrailingSlash(s) {
   return s.replace(/\/+$/, '')
 }
 
-export function backendApiOrigin() {
-  const raw = import.meta.env.VITE_API_BASE
+function normalizeApiBase(raw) {
   const s = typeof raw === 'string' ? raw.trim() : ''
   if (!s) return ''
-  return stripTrailingSlash(s)
+  let base = stripTrailingSlash(s)
+  if (base.endsWith('/api')) base = base.slice(0, -4)
+  return base
+}
+
+export function backendApiOrigin() {
+  return normalizeApiBase(import.meta.env.VITE_API_BASE)
 }
 
 /** Path must start with / (e.g. `/api/stats`). Returns absolute URL in prod when VITE_API_BASE is set. */
