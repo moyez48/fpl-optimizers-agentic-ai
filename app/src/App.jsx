@@ -178,15 +178,17 @@ export default function App() {
   const [hasManualEdits, setHasManualEdits] = React.useState(false)
 
   // Fetch a manager's squad from the hosted backend by FPL ID.
-  // Hits ${VITE_API_BASE}/api/squad/<fpl_id>; maps backend keys → UI state.
+  // Hits ${VITE_API_BASE}/api/squad?entry=<fpl_id>; maps backend keys → UI state.
   const fetchManagerSquad = React.useCallback(async (id, gw = null) => {
     const clean = String(id ?? '').trim()
     if (!clean) return
     setSquadLoading(true)
     setSquadError(null)
     try {
-      const qs = gw != null ? `?gw=${encodeURIComponent(gw)}` : ''
-      const url = pitchcraftApiUrl(`/api/squad/${encodeURIComponent(clean)}${qs}`)
+      const params = new URLSearchParams()
+      params.set('entry', clean)
+      if (gw != null) params.set('gw', String(gw))
+      const url = pitchcraftApiUrl(`/api/squad?${params.toString()}`)
       const res = await fetch(url)
       if (!res.ok) {
         const msg = await res.text().catch(() => '')
