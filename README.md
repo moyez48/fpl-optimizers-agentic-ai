@@ -1,11 +1,10 @@
 ﻿---
-title: FPL Optimizer API
+title: Pitchcraft API
 emoji: ⚽
 colorFrom: blue
 colorTo: green
 sdk: docker
 pinned: false
-app_port: 7860
 ---
 
 # FPL Optimizer - Agentic AI Edition
