@@ -7,102 +7,122 @@ sdk: docker
 pinned: false
 ---
 
-# FPL Optimizer - Agentic AI Edition
+# Pitchcraft — FPL Optimizer (Agentic AI)
 
-> **A multi-agent AI system for the 2025-26 Fantasy Premier League season.**  
-> Built by a team of 5 developers across 9 structured weeks, progressing from statistical modelling through autonomous agents to a deployed product.
+> **A multi-agent Fantasy Premier League assistant for the 2025-26 season.**  
+> XGBoost point predictions, LangGraph agents for XI/captaincy/transfers, and a **Pitchcraft** React UI for live squad management, transfer simulation, and optimization.
 
----
+**Live deployments**
 
-## Project Vision
-
-The FPL Optimizer is not a static prediction tool. The end goal is a **network of specialised AI agents** that autonomously reason about transfers, captaincy, squad selection, and fixture difficulty, informed by live data and a continuously improving ML backbone.
-
-Each agent has a defined role:
-
-| Agent | Responsibility |
-|-------|----------------|
-| **Statistician** | Predicts GW points using XGBoost and feature-engineered historical data (LangGraph pipeline) |
-| **Sporting Director** | Evaluates transfer options against budget, squad constraints, and fixture outlook |
-| **Manager** | Selects captaincy and armband logic from predictions and squad context |
+| Layer | Host | Notes |
+|-------|------|--------|
+| Frontend | [Vercel](https://pitchcraft.vercel.app) | Vite app in `app/` — root directory set to `app` in Vercel project settings |
+| Backend API | [Hugging Face Space](https://moyez48-pitchcraft-api.hf.space) | Docker Space — FastAPI on port **7860** |
 
 ---
 
-## Current Status
+## What it does
 
-- **ML & data**: Ingestion, cleaning, feature engineering, and baseline **XGBoost** training on a GW 38 holdout; optional **history-aware** training (`train_with_history.py`) and serialized models under `models/`.
-- **Agents**: **LangGraph** Stats Agent batch-predicts per gameweek; **Sporting Director** and **Manager** agents run over squad and prediction state (see `agents/`).
-- **Product**: **React (Vite)** frontend in `app/` and **FastAPI** backend in `backend/` exposing stats, predictions, and agent orchestration endpoints.
+Pitchcraft loads a manager's real FPL squad (by entry ID), enriches every player with model **xPts** for the selected gameweek, and lets you:
 
-### Model evaluation (XGBoost)
+- **View & edit** formation, captain, vice, and bench order on an interactive pitch
+- **Simulate transfers** in a sandbox (`displaySquad` / `actualSquad` split — revert restores the real squad)
+- **Run optimization** — Manager Agent (XI + captaincy + chips) and Sporting Director (transfer recommendations) in one `/api/optimize` call
+- **Poll live GW scores** during the active gameweek
 
-**Production model — `xgb_history_v2`** (`models/xgb_history_v2.pkl`):
+Under the hood, three specialised agents share a cached Stats Agent batch run per gameweek:
 
-Walk-forward validation on **2024-25 GW10–38** (29 folds), trained with multi-season history (see `models/xgb_history_v2_metadata.json`).
+| Agent | Role | Implementation |
+|-------|------|----------------|
+| **Statistician** | Batch GW point predictions for ~800 players | LangGraph pipeline in `agents/stats_agent/` → XGBoost `xgb_history_v2.pkl` |
+| **Manager** | Optimal XI, captain/vice, chip recommendation | `agents/manager_agent.py` |
+| **Sporting Director** | Transfer scoring, squad health, fixture outlook | `agents/sporting_director/` |
 
-| Metric | Mean |
-|--------|------|
-| MAE | 1.030 pts |
-| RMSE | 1.957 pts |
-| R² | 0.318 |
-| Spearman ρ | 0.710 |
-| Top-10 precision | 0.145 |
-| Top-30 precision | 0.272 |
+---
 
-RMSE is reported alongside the other metrics in metadata; it is aligned with the same MAE scaling as the reproducible single-CSV CV below (see `rmse_mean_note` in the JSON).
+## Architecture
 
-**Reproducible walk-forward CV** (no Vaastav downloads — only `data/processed_fpl_data.csv`, `hist_base` empty):
+```
+Browser (Pitchcraft UI — app/)
+    │  VITE_API_BASE → HF Space  (prod)  or  Vite /api proxy → localhost:8006 (dev)
+    ▼
+FastAPI (backend/main.py)
+    │  POST /api/stats  →  LangGraph Stats Agent  →  in-memory GW cache
+    │  GET  /api/squad?entry=<id>  →  FPL API picks + cached predictions
+    │  POST /api/optimize  →  Manager + Sporting Director
+    ▼
+data/processed_fpl_data.csv  +  models/xgb_history_v2.pkl
+```
+
+**Latency (measured locally, cold start):** Stats Agent full graph ~**47–60 s** per gameweek; Manager Agent XI selection **< 1 ms** once predictions are cached. Subsequent API calls for the same `(season, gameweek)` reuse the cache (~1 hour TTL).
+
+---
+
+## Model evaluation
+
+Production model: **`models/xgb_history_v2.pkl`** (51 features, target = `total_points`).
+
+All walk-forward numbers below come from `analysis/compute_cv_metrics.py` on `data/processed_fpl_data.csv`. Re-run anytime to regenerate JSON under `models/`.
+
+### How metrics are defined
+
+- **MAE** — mean absolute error between predicted and actual GW points, averaged over all player-rows in the test GW, then averaged across folds:  
+  `mean(|actual_points − predicted_points|)`
+- **Top-K precision** — overlap of model's predicted top-K scorers with actual top-K scorers **across the full player pool** that GW:  
+  `|top_K(pred) ∩ top_K(actual)| / K`  
+  This measures **pick identification quality**, not end-to-end squad selection from a fixed 15-man team (that backtest is not stored).
+
+### 2024-25 — GW10–38 (29 folds, processed CSV only)
 
 ```bash
 python analysis/compute_cv_metrics.py
+# → models/cv_metrics_processed_only.json
 ```
 
-Writes `models/cv_metrics_processed_only.json`. Latest run: **MAE 1.063**, **RMSE 2.030**, **R² 0.304**, **Spearman 0.703** (29 folds, 2024-25 GW10–38).
+| Metric | Mean |
+|--------|-----:|
+| MAE | **1.063** pts |
+| RMSE | **2.030** pts |
+| R² | **0.304** |
+| Spearman ρ | **0.703** |
+| Top-10 precision | **17.6%** |
+| Top-30 precision | **30.5%** |
 
-**2025-26 season — walk-forward on GW1–30 request** (processed CSV only; train = all **2024-25** + **2025-26** rows with GW &lt; test GW):
+### 2025-26 — GW2–30 (29 folds; GW1 skipped — no test rows after feature `dropna`)
+
+Train = all **2024-25** + **2025-26** rows with `GW < test_GW`.
 
 ```bash
 python analysis/compute_cv_metrics.py --test-season 2025-26 --gw-min 1 --gw-max 30 --prior-season 2024-25
+# → models/cv_metrics_2025-26_gw1_30.json
 ```
 
-Writes `models/cv_metrics_2025-26_gw1_30.json`. Latest run (means over **29 folds: GW2–30**; **GW1** has no test rows that pass the same feature `dropna` gate as later weeks, so it is omitted):
-
 | Metric | Mean |
-|--------|------|
-| MAE | 0.981 pts |
-| RMSE | 1.936 pts |
-| R² | 0.329 |
-| Spearman ρ | 0.724 |
-| Top-10 precision | 0.100 |
-| Top-30 precision | 0.200 |
+|--------|-----:|
+| MAE | **0.981** pts |
+| RMSE | **1.936** pts |
+| R² | **0.329** |
+| Spearman ρ | **0.724** |
+| Top-10 precision | **10.0%** |
+| Top-30 precision | **20.0%** |
 
-**Single-GW snapshot (Stats Agent, 2024-25 GW38)** — `predicted_pts` vs sanitised actuals, ~804 assets:
+Per-gameweek breakdowns are in `models/cv_metrics_2025-26_gw1_30.json` (`per_gw` array).
 
-| MAE | RMSE | R² |
-|-----|------|-----|
-| 0.987 pts | 1.998 pts | 0.373 |
+### Single-GW live check (Stats Agent output)
 
 ```bash
 python analysis/gw_prediction_metrics.py --gameweek 38 --season 2024-25
 ```
 
-**Notebook V0 baseline** (2024-25 train GW1–37 → test GW38, master features, notebook output): MAE **0.917** pts, RMSE **1.882** pts, R² **0.289** — used as the original “ML duel” reference.
+Optional flags: `--played-only` (exclude 0-minute assets), `--precision-k 5`.
 
-Further model variants (Random Forest, LightGBM, MLP, Ridge) remain part of the ML comparison track.
+### Training entrypoints
 
----
-
-## 9-Week Syllabus
-
-The team is split into two parallel tracks that converge at weekly sync points.
-
-| Week | Team A: ML & Agents | Team B: App & Deployment | Joint Sync Point |
-|------|---------------------|--------------------------|------------------|
-| **1-2** | **Baseline ML** — Train V0 model & set up data pipeline | **UI Scaffold** — Pitch view with mock data | **Contract**: JSON shape for a "Lineup" |
-| **3-4** | **Orchestration** — Connect agents via LangGraph | **Integration** — Frontend ↔ Agent API | **First Demo**: Real AI suggestion in the UI |
-| **5-6** | **Optimisation** — Cost-benefit & chip logic | **User Features** — History & compare views | **Deploy**: Alpha to Vercel / AWS |
-| **7-8** | **Fine-tuning** — ML V1 & explainability | **Edge cases** — Blank GWs & injuries | **Audit** vs actual GW results |
-| **9** | **Polish** — Latency & API speed | **UI/UX** — Motion & mobile | **Handover** |
+| Script | Purpose |
+|--------|---------|
+| `train_with_history.py` | Multi-season history-aware training → `xgb_history_v2.pkl` + metadata |
+| `analysis/compute_cv_metrics.py` | Reproducible walk-forward CV (no extra downloads) |
+| `update_data.py` | Merge latest GW into `processed_fpl_data.csv` (also runs on GitHub Actions schedule) |
 
 ---
 
@@ -110,91 +130,52 @@ The team is split into two parallel tracks that converge at weekly sync points.
 
 ```
 fpl-optimizers-agentic-ai/
-|
-+-- analysis/                    # ML pipeline — Statistician / features
-|   +-- data_ingestion.py
-|   +-- data_cleaning.py
-|   +-- feature_engineering.py
-|   +-- master_feature_engineering.py
-|   +-- fpl_pipeline.py
-|   +-- gw_prediction_metrics.py
-|   +-- compute_cv_metrics.py    # Walk-forward CV → models/cv_metrics_*.json
-|   +-- *.ipynb                  # EDA & model training notebooks
-|
-+-- agents/                      # LangGraph & agent logic
-|   +-- stats_agent/             # GW batch predictions
-|   +-- sporting_director/       # Transfers, squad, fixtures
-|   +-- manager_agent.py         # Captaincy / armband
-|
-+-- app/                         # React + Vite + Tailwind frontend
-+-- backend/                     # FastAPI — bridges UI to agents
-+-- models/                      # Trained model artifacts + CV metric JSON
-|   +-- xgb_history_v2_metadata.json
-|   +-- cv_metrics_processed_only.json
-|   +-- cv_metrics_2025-26_gw1_30.json     # 2025-26 GW2–30 walk-forward (see README)
-+-- data/                        # Processed CSV + API/cache JSON (raw seasons not committed)
-+-- scripts/                     # CLI helpers (e.g. full optimizer run)
-+-- reports/                     # Notebook-generated charts
-+-- .github/workflows/           # Scheduled / CI workflows
-+-- train_with_history.py        # Optional history-aware training entrypoint
-+-- update_data.py               # Data refresh helper
-+-- requirements.txt             # Includes backend/requirements.txt
-+-- README.md
+├── app/                         # Pitchcraft UI — React + Vite + Tailwind
+│   ├── src/App.jsx              # Main dashboard, squad state, GW selector
+│   ├── src/pitchcraft/          # Pitch, transfers panel, player chips
+│   ├── src/lib/pitchcraftApi.js # API URL helper (VITE_API_BASE)
+│   └── src/utils/               # optimalXI, squadEdit, transferApply, gameweekDisplay
+├── backend/
+│   ├── main.py                  # FastAPI — all /api/* routes
+│   └── requirements.txt
+├── agents/
+│   ├── stats_agent/             # LangGraph batch prediction pipeline
+│   ├── sporting_director/       # Transfers, VORP, fixtures, squad validation
+│   └── manager_agent.py         # XI, captaincy, chips
+├── analysis/                    # Feature engineering, CV, notebooks
+├── models/                      # xgb_history_v2.pkl + cv_metrics_*.json
+├── data/                        # processed_fpl_data.csv (LFS), fixtures cache
+├── Dockerfile                   # Hugging Face Space (port 7860)
+├── vercel.json                  # Vercel build (root dir = app/ in project settings)
+├── middleware.js                # Vercel edge proxy for /fpl-api/* → FPL official API
+├── update_data.py               # Weekly CSV refresh pipeline
+├── deploy.py                    # Manual HF upload helper (optional)
+└── .github/workflows/
+    ├── hf-sync.yml              # Push main → Hugging Face Space
+    └── weekly_update.yml        # Scheduled data refresh
 ```
+
+Large artifacts (`.pkl`, `.png`, `.csv`) are tracked with **Git LFS** (see `.gitattributes`).
 
 ---
 
-## Getting Started
+## Getting started (local)
 
-### 1. Clone
+### 1. Clone & Python env
 
 ```bash
 git clone https://github.com/moyez48/fpl-optimizers-agentic-ai.git
 cd fpl-optimizers-agentic-ai
-```
+git lfs pull
 
-### 2. Python environment
-
-```bash
 python -m venv .venv
-
-# Windows
-.venv\Scripts\activate
-
-# macOS / Linux
-source .venv/bin/activate
+# Windows:  .venv\Scripts\activate
+# macOS/Linux:  source .venv/bin/activate
 
 pip install -r requirements.txt
 ```
 
-### 3. Raw FPL season data (for rebuilding `processed_fpl_data.csv`)
-
-Download the [Vaastav FPL Historical Dataset](https://github.com/vaastav/Fantasy-Premier-League/) and place seasons under `data/`:
-
-```
-data/
-  2024-25/gws/merged_gw.csv
-  2025-26/gws/merged_gw.csv
-```
-
-### 4. Run the feature pipeline
-
-```python
-from analysis.fpl_pipeline import FPLPipeline
-
-pipeline = FPLPipeline(base_path="data")
-pipeline.run_full_pipeline()
-# Writes data/processed_fpl_data.csv
-```
-
-### 5. Jupyter notebooks
-
-```bash
-jupyter notebook analysis/fpl_eda_analysis.ipynb
-jupyter notebook analysis/fpl_model_training.ipynb
-```
-
-### 6. Backend (FastAPI)
+### 2. Backend
 
 From the **repository root**:
 
@@ -202,10 +183,12 @@ From the **repository root**:
 uvicorn backend.main:app --host 0.0.0.0 --port 8006 --reload
 ```
 
-- API docs: `http://127.0.0.1:8006/docs`  
-- First stats request per gameweek may take ~minute while the LangGraph batch run completes; results are cached per (season, gameweek).
+- Docs: http://127.0.0.1:8006/docs  
+- Health: http://127.0.0.1:8006/health  
 
-### 7. Frontend (Vite)
+Requires `data/processed_fpl_data.csv` and `models/xgb_history_v2.pkl` (pull LFS after clone).
+
+### 3. Frontend
 
 ```bash
 cd app
@@ -213,33 +196,89 @@ npm install
 npm run dev
 ```
 
-Default dev server: `http://localhost:5173` (CORS is configured for common Vite ports in `backend/main.py`).
+Open http://localhost:5173 — Vite proxies `/api/*` to `http://127.0.0.1:8006` (override with `VITE_API_PROXY` in `app/.env.local`).
 
-### 8. CLI — full pipeline without HTTP
+### 4. Load a squad
 
-From the repo root (requires network access to the FPL API for live squad data):
+Enter your FPL **manager entry ID** in the UI and click **Load Team**, or set `VITE_FPL_ENTRY_ID` in `app/.env.local` for auto-bootstrap.
+
+### 5. CLI (no HTTP)
 
 ```bash
 python scripts/run_optimizer.py <FPL_MANAGER_ID>
 ```
 
-### 9. Production deploy (Vercel + hosted API)
+---
 
-- **Frontend**: Import this repo into Vercel with **project root = repository root**. Build is defined in [`vercel.json`](./vercel.json). Set **`VITE_API_BASE`** in Vercel (Production / Preview as needed) to your public FastAPI URL with **no trailing slash**, then redeploy so Vite inlines it.
-- **FastAPI backend**: Deploy separately with `uvicorn backend.main:app`; include `data/processed_fpl_data.csv`, XGBoost model files, and the same repo layout locally. Tune host timeouts — the **first `/api/stats` per gameweek** may take ~minute; later requests use an in‑memory cache (single instance/process keeps this effective).
-- **CORS**: `https://*.vercel.app` is allowed via regex. For a **custom apex domain**, set **`CORS_ALLOWED_ORIGINS`** on the API host to a comma‑separated list (e.g. `https://fpl.myapp.com`).
-- **Live FPL squad import**: [`middleware.js`](./middleware.js) at the repo root proxies **`/fpl-api/*`** to the official API with browser-like headers (replacing the old plain rewrite). Locally, Vite’s proxy in [`app/vite.config.js`](./app/vite.config.js) does the same for dev.
+## API overview
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Liveness |
+| POST | `/api/stats` | Full ranked player list for a GW (runs Stats Agent if not cached) |
+| GET | `/api/predict/{player_id}` | Single-player prediction (uses GW cache) |
+| GET | `/api/players?gw=` | All players with xPts for a GW |
+| GET | `/api/squad?entry=<fpl_id>` | Pitchcraft bootstrap — squad layout + enriched players |
+| GET | `/api/squad/{fpl_id}` | Path-param alias for the above |
+| POST | `/api/optimize` | Manager XI + Sporting Director transfers |
+| POST | `/api/manager` | Manager Agent only |
+| POST | `/api/transfers` | Sporting Director only |
+| GET | `/api/event/{gw}/live-points` | Live element scores (active GW polling) |
+| GET | `/api/data/meta` | CSV freshness / GW range snapshot |
 
 ---
 
-## Data Credit
+## Deployment
 
-All raw match and player data is sourced from the **Vaastav FPL Historical Dataset**.
+### Frontend — Vercel
+
+1. Import repo; set **Root Directory** to **`app`**
+2. Build settings are in [`vercel.json`](./vercel.json) at repo root (install/build/output paths assume `app` is cwd)
+3. Production API origin is baked in via [`app/.env.production`](./app/.env.production):
+
+   ```
+   VITE_API_BASE=https://moyez48-pitchcraft-api.hf.space
+   ```
+
+   Routes in code append `/api/...` — do **not** include `/api` in the base URL.
+
+4. [`middleware.js`](./middleware.js) proxies `/fpl-api/*` to the official FPL API on Vercel (browser-like headers).
+
+### Backend — Hugging Face Spaces
+
+- Space: **moyez48/pitchcraft-api** (Docker SDK)
+- [`Dockerfile`](./Dockerfile) at repo root — `uvicorn backend.main:app --host 0.0.0.0 --port 7860`
+- Pushes to `main` sync via [`.github/workflows/hf-sync.yml`](./.github/workflows/hf-sync.yml) (`hf upload` + `PITCHCRAFT_AI` secret)
+- **CORS** in `backend/main.py`: `https://pitchcraft.vercel.app`, `https://*.vercel.app`, localhost Vite ports; extend with `CORS_ALLOWED_ORIGINS` env var
+
+### Data refresh (CI)
+
+[`.github/workflows/weekly_update.yml`](./.github/workflows/weekly_update.yml) runs `update_data.py` on a schedule and commits updated `processed_fpl_data.csv` when new gameweeks are available.
+
+---
+
+## Environment variables
+
+| Variable | Where | Purpose |
+|----------|-------|---------|
+| `VITE_API_BASE` | Vercel / `app/.env.production` | Public FastAPI origin (no trailing slash) |
+| `VITE_API_PROXY` | `app/.env.local` | Local dev proxy target (default `http://127.0.0.1:8006`) |
+| `VITE_FPL_ENTRY_ID` | `app/.env.local` | Optional auto-load squad on startup |
+| `CORS_ALLOWED_ORIGINS` | HF Space / backend host | Extra comma-separated allowed origins |
+| `SKIP_FPL_CSV_REFRESH` | Backend | Skip pre-request CSV refresh |
+| `AUTO_REFRESH_FPL_DATA` | Backend | Enable periodic CSV sweep in lifespan |
+| `PITCHCRAFT_AI` | GitHub Actions secret | HF upload token for `hf-sync.yml` |
+
+---
+
+## Data credit
+
+Raw historical season CSVs: [Vaastav FPL Historical Dataset](https://github.com/vaastav/Fantasy-Premier-League/) — not redistributed here; download separately if rebuilding from scratch.
+
+Live picks, bootstrap, and fixtures: [Fantasy Premier League API](https://fantasy.premierleague.com/api/).
 
 > Anand, V. (2022). *FPL Historical Dataset*. https://github.com/vaastav/Fantasy-Premier-League/
 
-This repository does not redistribute raw season CSV files; download them from the link above.
-
 ---
 
-*FPL Optimizer — Agentic AI Edition — Team project — 2025-26*
+*Pitchcraft / FPL Optimizer — Agentic AI — 2025-26*
