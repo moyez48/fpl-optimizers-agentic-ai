@@ -1,20 +1,20 @@
 {
   "model": {
     "name": "xgb_history_v2",
-    "version": "2.0",
-    "created": "2026-03-09 01:17:00",
+    "version": "2.1",
+    "created": "2026-10-22 17:18:54",
     "type": "XGBRegressor",
-    "description": "XGBoost FPL points predictor trained on 4 historical seasons (2020-24) plus 2024-25. Walk-forward CV validated on GW10-38."
+    "description": "XGBoost FPL points predictor retrained for 2026-27 (GW8) on 5 seasons (2022-23 to 2026-27), including defensive-contribution features. Walk-forward CV validated on 2026-27 GW3-7."
   },
   "training": {
     "seasons": [
-      "2020-21",
-      "2021-22",
       "2022-23",
       "2023-24",
-      "2024-25"
+      "2024-25",
+      "2025-26",
+      "2026-27"
     ],
-    "total_rows": 94975,
+    "total_rows": 106546,
     "features": [
       "last_3_avg_points",
       "last_5_avg_points",
@@ -51,6 +51,12 @@
       "cs_rate_last_3",
       "goals_conceded_last_3",
       "team_cs_rate_last_3",
+      "defensive_contribution_last_3",
+      "defensive_contribution_last_5",
+      "defensive_contribution_per_90_last_3",
+      "tackles_last_3",
+      "recoveries_last_3",
+      "clearances_blocks_interceptions_last_3",
       "position_GK",
       "position_DEF",
       "position_MID",
@@ -59,7 +65,6 @@
       "was_home",
       "value",
       "games_played",
-      "opponent_strength",
       "pos_x_opp_strength",
       "transfer_momentum",
       "attacker_x_xP",
@@ -68,7 +73,7 @@
       "cs_per_game",
       "availability_weight"
     ],
-    "n_features": 51,
+    "n_features": 56,
     "target": "total_points",
     "params": {
       "n_estimators": 500,
@@ -84,18 +89,18 @@
       "verbosity": 0,
       "early_stopping_rounds": 30,
       "eval_metric": "mae"
-    }
+    },
+    "early_stopping_holdout": "time-based: latest gameweeks of the most recent season in the training frame"
   },
   "cv_performance": {
-    "method": "walk-forward CV, GW10-38 of 2024-25",
-    "n_folds": 29,
-    "mae_mean": 1.0295,
-    "rmse_mean": 1.957,
-    "rmse_mean_note": "Derived from reproducible walk-forward on processed_fpl_data.csv only (rmse_mean 2.0184, mae_mean 1.0616) scaled by mae_mean ratio to this row (1.0295/1.0616). Re-run train_with_history.py with Vaastav seasons for an exact multi-season RMSE.",
-    "r2_mean": 0.3179,
-    "spearman_mean": 0.7104,
-    "top10_precision_mean": 0.1448,
-    "top30_precision_mean": 0.2724
+    "method": "walk-forward CV, 2026-27 GW3-7; train = all prior seasons + 2026-27 GW < test GW",
+    "n_folds": 5,
+    "mae_mean": 1.1495,
+    "rmse_mean": 2.0823,
+    "r2_mean": 0.3136,
+    "spearman_mean": 0.7069,
+    "top10_precision_mean": 0.12,
+    "top30_precision_mean": 0.2333
   },
   "usage": {
     "load": "import pickle; model = pickle.load(open('models/xgb_history_v2.pkl','rb'))",

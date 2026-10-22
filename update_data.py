@@ -78,8 +78,13 @@ if ANALYSIS_DIR not in sys.path:
     sys.path.insert(0, ANALYSIS_DIR)
 
 # Season label applied to fetched rows — aligned with olbauday/FPL-Core-Insights
-# path `data/2025-2026/`. Bump annually when ingest targets a new season.
-ACTIVE_INGEST_SEASON = "2025-26"
+# path `data/2026-2027/`. Bump annually when ingest targets a new season.
+ACTIVE_INGEST_SEASON = "2026-27"
+
+# olbauday repo season directory, e.g. "2026-27" -> "2026-2027".
+_INGEST_SEASON_DIR = (
+    f"{ACTIVE_INGEST_SEASON[:4]}-{int(ACTIVE_INGEST_SEASON[:4]) + 1}"
+)
 
 
 FPL_BOOTSTRAP_URL = "https://fantasy.premierleague.com/api/bootstrap-static/"
@@ -481,6 +486,147 @@ def processed_csv_already_current(force: bool) -> tuple[bool, str]:
 # mark the workflow run as FAILED and the existing CSV stays untouched.
 # =============================================================================
 
+def enrich_gw_rows(
+    df: pd.DataFrame,
+    gw: int,
+    bootstrap: dict | None = None,
+    fixtures: list | None = None,
+) -> pd.DataFrame:
+    """
+    Add the vaastav-schema columns the olbauday GW export lacks —
+    ``position``, ``team``, ``was_home``, ``opponent_team``, ``kickoff_time``,
+    ``fixture``, ``team_h_score`` / ``team_a_score``, ``xP`` — from the live
+    FPL bootstrap-static + fixtures APIs, keyed on the element id.
+
+    Without these, merged rows break MasterFPLFeatureEngineer (which requires
+    position / team / opponent_team / was_home). ``xP`` is FPL's expected
+    points for the gameweek just played (``ep_this`` in the export).
+    Team/position come from the *current* bootstrap, so a player who changed
+    clubs mid-window is labelled with his current club for every fetched GW —
+    an accepted approximation for the weekly ingest (rolling features are
+    grouped by player + season either way).
+    """
+    if df.empty or "element" not in df.columns:
+        return df
+
+    bootstrap = bootstrap if bootstrap is not None else fetch_bootstrap_static()
+    if fixtures is None:
+        try:
+            fx_resp = requests.get(FPL_FIXTURES_URL, timeout=60)
+            fixtures = fx_resp.json() if fx_resp.status_code == 200 else []
+        except Exception:
+            fixtures = []
+
+    el = pd.DataFrame(bootstrap.get("elements") or [])
+    team_id_to_name = {
+        int(t["id"]): str(t.get("name") or "").strip()
+        for t in bootstrap.get("teams") or []
+        if t.get("id") is not None
+    }
+    team_id_to_short = {
+        int(t["id"]): str(t.get("short_name") or "").strip()
+        for t in bootstrap.get("teams") or []
+        if t.get("id") is not None
+    }
+    pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+
+    out = df.copy()
+    out["element"] = pd.to_numeric(out["element"], errors="coerce")
+    if not el.empty and "id" in el.columns:
+        el_map = pd.DataFrame({
+            "element": pd.to_numeric(el["id"], errors="coerce"),
+            "_team_id": pd.to_numeric(el["team"], errors="coerce"),
+            "_pos": pd.to_numeric(el["element_type"], errors="coerce").map(pos_map),
+        }).drop_duplicates(subset=["element"])
+        out = out.merge(el_map, on="element", how="left")
+
+        # ── Display names ─────────────────────────────────────────────────
+        # FPL web_name collides across players (three "Phillips", three
+        # "Wilson", ...), and the master CSV keys rolling features and the
+        # merge dedupe on `name` — raw web_names would silently drop one
+        # player per collision and mix the survivors' histories. Use the
+        # vaastav convention "F.Secondname", falling back to the full name
+        # (then a team suffix) where that still collides. Computed over the
+        # whole bootstrap so a player's name is stable across gameweeks.
+        if "first_name" in el.columns and "second_name" in el.columns:
+            nm = pd.DataFrame({
+                "element": pd.to_numeric(el["id"], errors="coerce"),
+                "_first": el["first_name"].astype(str),
+                "_second": el["second_name"].astype(str),
+                "_tshort": pd.to_numeric(el["team"], errors="coerce").map(
+                    lambda t: team_id_to_short.get(int(t)) if pd.notna(t) else ""
+                ),
+            }).drop_duplicates(subset=["element"])
+            nm["_disp"] = nm["_first"].str[0] + "." + nm["_second"]
+            _dup = nm["_disp"].duplicated(keep=False)
+            nm.loc[_dup, "_disp"] = nm.loc[_dup, "_first"] + " " + nm.loc[_dup, "_second"]
+            _dup2 = nm["_disp"].duplicated(keep=False)
+            nm.loc[_dup2, "_disp"] = (
+                nm.loc[_dup2, "_first"] + " " + nm.loc[_dup2, "_second"]
+                + " (" + nm.loc[_dup2, "_tshort"] + ")"
+            )
+            out = out.merge(nm[["element", "_disp"]], on="element", how="left")
+            if "name" in out.columns:
+                out["name"] = out["_disp"].fillna(out["name"])
+            else:
+                out["name"] = out["_disp"]
+            out = out.drop(columns=["_disp"])
+    else:
+        out["_team_id"] = np.nan
+        out["_pos"] = np.nan
+
+    out["team"] = out["_team_id"].map(
+        lambda t: team_id_to_name.get(int(t)) if pd.notna(t) else np.nan
+    )
+    out["position"] = out["_pos"]
+
+    # Fixture facts per team id for this GW.
+    fx_by_team: dict[int, dict] = {}
+    for fx in fixtures or []:
+        if fx.get("event") != gw:
+            continue
+        hid, aid = fx.get("team_h"), fx.get("team_a")
+        if hid is None or aid is None:
+            continue
+        fx_by_team[int(hid)] = {
+            "was_home": 1.0, "opponent_team": float(aid),
+            "kickoff_time": fx.get("kickoff_time"),
+            "fixture": fx.get("id"),
+            "team_h_score": fx.get("team_h_score"),
+            "team_a_score": fx.get("team_a_score"),
+        }
+        fx_by_team[int(aid)] = {
+            "was_home": 0.0, "opponent_team": float(hid),
+            "kickoff_time": fx.get("kickoff_time"),
+            "fixture": fx.get("id"),
+            "team_h_score": fx.get("team_h_score"),
+            "team_a_score": fx.get("team_a_score"),
+        }
+
+    for col in ("was_home", "opponent_team", "kickoff_time", "fixture",
+                "team_h_score", "team_a_score"):
+        out[col] = out["_team_id"].map(
+            lambda t, c=col: fx_by_team.get(int(t), {}).get(c) if pd.notna(t) else np.nan
+        )
+
+    if "ep_this" in out.columns:
+        out["xP"] = pd.to_numeric(out["ep_this"], errors="coerce")
+    # Unit fix: the olbauday export's now_cost is in £m (Haaland 15.5) while
+    # the master CSV, vaastav history and the FPL bootstrap all store price
+    # in tenths of £m (Haaland 155). Convert so `value` is consistent —
+    # mixed scales silently corrupt the model's price feature.
+    if "value" in out.columns:
+        out["value"] = pd.to_numeric(out["value"], errors="coerce") * 10
+    out["round"] = gw
+    if "transfers_in" in out.columns and "transfers_out" in out.columns:
+        out["transfers_balance"] = (
+            pd.to_numeric(out["transfers_in"], errors="coerce").fillna(0)
+            - pd.to_numeric(out["transfers_out"], errors="coerce").fillna(0)
+        )
+
+    return out.drop(columns=["_team_id", "_pos"], errors="ignore")
+
+
 def fetch_latest_gameweek_data() -> pd.DataFrame:
     """
     Dynamically find the latest finished Gameweek via the FPL API, then
@@ -503,11 +649,11 @@ def fetch_latest_gameweek_data() -> pd.DataFrame:
 
     # ── 1b. Fetch player_gameweek_stats.csv for that GW from the repo ────
     # Repo path structure (actual filenames as of 2025-26):
-    #   data/2025-2026/By Gameweek/GW{N}/player_gameweek_stats.csv
+    #   data/2026-2027/By Gameweek/GW{N}/player_gameweek_stats.csv
     # Spaces in the path must be URL-encoded as %20.
     repo_url = (
         f"https://raw.githubusercontent.com/olbauday/FPL-Core-Insights/main"
-        f"/data/2025-2026/By%20Gameweek/GW{latest_gw}/player_gameweek_stats.csv"
+        f"/data/{_INGEST_SEASON_DIR}/By%20Gameweek/GW{latest_gw}/player_gameweek_stats.csv"
     )
 
     log.info(f"  Fetching raw CSV from: {repo_url}")
@@ -535,6 +681,10 @@ def fetch_latest_gameweek_data() -> pd.DataFrame:
 
     # Add season column so the dedup key (name, GW, season) works correctly
     df["season"] = ACTIVE_INGEST_SEASON
+
+    # The olbauday export has no position/team/fixture columns — enrich from
+    # the live FPL API so the merged rows match the master CSV schema.
+    df = enrich_gw_rows(df, latest_gw)
 
     log.info(
         f"  Successfully loaded GW{latest_gw} data: "

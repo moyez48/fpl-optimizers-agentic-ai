@@ -260,6 +260,11 @@ def main():
         # Team / defensive
         'team_goals_last_3',
         'cs_rate_last_3', 'goals_conceded_last_3', 'team_cs_rate_last_3',
+        # Defensive contributions (2025-26+ stat; 0-filled where unrecorded)
+        'defensive_contribution_last_3', 'defensive_contribution_last_5',
+        'defensive_contribution_per_90_last_3',
+        'tackles_last_3', 'recoveries_last_3',
+        'clearances_blocks_interceptions_last_3',
         # opponent_clean_sheet_rate excluded — NaN for all historical seasons
         # Position
         'position_GK', 'position_DEF', 'position_MID', 'position_FWD',
@@ -386,13 +391,39 @@ def main():
     print('=' * 60)
 
     all_data = combined.dropna(subset=FEATURES + ['total_points'])
-    X_all = all_data[FEATURES]
-    y_all = all_data['total_points']
 
-    # 90/10 internal split for early stopping only
-    split = int(len(all_data) * 0.9)
-    X_tr, y_tr = X_all.iloc[:split], y_all.iloc[:split]
-    X_val, y_val = X_all.iloc[split:], y_all.iloc[split:]
+    # Time-based holdout for early stopping only.
+    # Previously this was an iloc 90/10 split of a name-sorted frame, which made
+    # the "validation" set an alphabetical slice of players. Instead, hold out
+    # the latest gameweeks of the most recent season so early stopping is
+    # judged on genuinely future data (fallback: chronological 10% tail).
+    all_data['_season_year'] = all_data['season'].map(
+        lambda s: int(str(s).split('-')[0])
+    )
+    all_data = all_data.sort_values(['_season_year', 'GW']).reset_index(drop=True)
+    _latest_year = all_data['_season_year'].max()
+    _latest_gws = sorted(
+        all_data.loc[all_data['_season_year'] == _latest_year, 'GW'].unique()
+    )
+    _val_gws = _latest_gws[-2:]
+    val_mask = (
+        (all_data['_season_year'] == _latest_year)
+        & (all_data['GW'].isin(_val_gws))
+    )
+    if val_mask.sum() < 100 or val_mask.sum() > 0.3 * len(all_data):
+        _cut = int(len(all_data) * 0.9)
+        val_mask = pd.Series(False, index=all_data.index)
+        val_mask.iloc[_cut:] = True
+        print(f'  Early-stopping holdout: chronological last 10% '
+              f'({int(val_mask.sum()):,} rows)')
+    else:
+        print(f'  Early-stopping holdout: latest season GWs {_val_gws} '
+              f'({int(val_mask.sum()):,} rows)')
+    X_tr, y_tr = (all_data.loc[~val_mask, FEATURES],
+                  all_data.loc[~val_mask, 'total_points'])
+    X_val, y_val = (all_data.loc[val_mask, FEATURES],
+                    all_data.loc[val_mask, 'total_points'])
+    all_data = all_data.drop(columns=['_season_year'])
 
     final_model = XGBRegressor(**XGB_PARAMS)
     final_model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
@@ -412,10 +443,13 @@ def main():
     final_model.save_model(model_path_json)
 
     avg_mae  = np.mean([r['mae'] for r in results])
+    avg_rmse = np.mean([r['rmse'] for r in results])
     avg_sp   = np.mean([r['spearman'] for r in results])
     avg_r2   = np.mean([r['r2'] for r in results])
     avg_t10  = np.mean([r['top10'] for r in results])
     avg_t30  = np.mean([r['top30'] for r in results])
+
+    actual_seasons = sorted(all_data['season'].astype(str).unique().tolist())
 
     metadata = {
         'model': {
@@ -424,12 +458,13 @@ def main():
             'created': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'type': 'XGBRegressor',
             'description': (
-                'XGBoost FPL points predictor trained on 4 historical seasons '
-                '(2020-24) plus 2024-25. Walk-forward CV validated on GW10-38.'
+                f'XGBoost FPL points predictor trained on {len(actual_seasons)} '
+                f'seasons ({actual_seasons[0]} to {actual_seasons[-1]}). '
+                f'Walk-forward CV validated on {test_season} GW10-38.'
             ),
         },
         'training': {
-            'seasons': ['2020-21', '2021-22', '2022-23', '2023-24', '2024-25'],
+            'seasons': actual_seasons,
             'total_rows': int(len(all_data)),
             'features': FEATURES,
             'n_features': len(FEATURES),
@@ -440,6 +475,7 @@ def main():
             'method': 'walk-forward CV, GW10-38 of 2024-25',
             'n_folds': len(results),
             'mae_mean': round(avg_mae, 4),
+            'rmse_mean': round(avg_rmse, 4),
             'r2_mean': round(avg_r2, 4),
             'spearman_mean': round(avg_sp, 4),
             'top10_precision_mean': round(avg_t10, 4),

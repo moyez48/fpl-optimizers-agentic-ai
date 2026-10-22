@@ -384,6 +384,64 @@ class MasterFPLFeatureEngineer:
         return self.df
 
     # ========================================================================
+    # 7b. DEFENSIVE CONTRIBUTION FEATURES (DEF / MID focused)
+    # ========================================================================
+
+    def add_defensive_contribution_features(self, windows: list = [3, 5]) -> pd.DataFrame:
+        """
+        Rolling features from FPL's defensive-action stats.
+
+        FPL only publishes ``defensive_contribution`` from 2025-26 (it is the
+        stat behind the defensive-contribution points introduced that season);
+        ``tackles``, ``recoveries`` and ``clearances_blocks_interceptions``
+        exist in the raw data for recent seasons but were never engineered.
+
+        All features are lag-safe: grouped by (name, season), shifted by 1 GW,
+        then rolling-averaged — predicting GW N uses GWs < N only.
+
+            defensive_contribution_last_3 / _last_5 : rolling mean DC
+            defensive_contribution_per_90_last_3    : rolling mean DC per 90
+            tackles_last_3, recoveries_last_3,
+            clearances_blocks_interceptions_last_3  : rolling mean components
+
+        NaNs are filled with 0 (same convention as ``points_std_last_5``):
+        for seasons where FPL did not record the stat, 0 means "no recorded
+        defensive contributions", which keeps those rows trainable instead of
+        dropping every pre-2025-26 row on NaN.
+        """
+        grp_cols = ['name', 'season']
+
+        for col in ['defensive_contribution', 'tackles', 'recoveries',
+                    'clearances_blocks_interceptions']:
+            if col not in self.df.columns:
+                continue
+            wins = windows if col == 'defensive_contribution' else [3]
+            for w in wins:
+                alias = f'{col}_last_{w}'
+                self.df[alias] = (
+                    self.df.groupby(grp_cols)[col]
+                    .transform(
+                        lambda x: x.shift(1).rolling(window=w, min_periods=1).mean()
+                    )
+                ).fillna(0)
+
+        # Per-90 defensive contribution (rate, so low-minute cameos don't
+        # compare equal with full-match defenders).
+        if 'defensive_contribution' in self.df.columns and 'minutes' in self.df.columns:
+            mins = self.df['minutes'].replace(0, np.nan)
+            per90 = ((self.df['defensive_contribution'] / mins) * 90).fillna(0)
+            self.df['_dc_per90_tmp'] = per90
+            self.df['defensive_contribution_per_90_last_3'] = (
+                self.df.groupby(grp_cols)['_dc_per90_tmp']
+                .transform(
+                    lambda x: x.shift(1).rolling(window=3, min_periods=1).mean()
+                )
+            ).fillna(0)
+            self.df.drop(columns=['_dc_per90_tmp'], inplace=True)
+
+        return self.df
+
+    # ========================================================================
     # 8. PROPERLY LAGGED PER-90 RATES
     # ========================================================================
 
@@ -602,6 +660,10 @@ class MasterFPLFeatureEngineer:
         # 9. Defensive features (clean sheet rate, opponent xGC)
         print("  -> Defensive features (CS rate, opponent xGC)")
         self.add_defensive_features(windows=[3, 5])
+
+        # 9b. Defensive contribution features (tackles / recoveries / CBI / DC)
+        print("  -> Defensive contribution features")
+        self.add_defensive_contribution_features(windows=[3, 5])
 
         # 10. xP rolling features
         print("  -> xP rolling features (FPL expected points)")
