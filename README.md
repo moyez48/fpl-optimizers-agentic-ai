@@ -1,4 +1,4 @@
-﻿---
+---
  
 title: Pitchcraft API
 emoji: ⚽
@@ -10,7 +10,7 @@ pinned: false
 
 # Pitchcraft — FPL Optimizer (Agentic AI)
 
-> **A multi-agent Fantasy Premier League assistant for the 2025-26 season.**  
+> **A multi-agent Fantasy Premier League assistant for the 2026-27 season.**  
 > XGBoost point predictions, LangGraph agents for XI/captaincy/transfers, and a **Pitchcraft** React UI for live squad management, transfer simulation, and optimization.
 
 **Live deployments**
@@ -61,9 +61,18 @@ data/processed_fpl_data.csv  +  models/xgb_history_v2.pkl
 
 ## Model evaluation
 
-Production model: **`models/xgb_history_v2.pkl`** (51 features, target = `total_points`).
+Production model: **`models/xgb_history_v2.pkl`** — **v2.1** (56 features, target = `total_points`).
 
-All walk-forward numbers below come from `analysis/compute_cv_metrics.py` on `data/processed_fpl_data.csv`. Re-run anytime to regenerate JSON under `models/`.
+### What's new in v2.1 (2026-27 update)
+
+- **2026-27 ingest** — `update_data.py` now targets the 2026-27 season (`ACTIVE_INGEST_SEASON`); GW1–7 backfilled via `scripts/ingest_2026_27.py` from the olbauday/FPL-Core-Insights feed, enriched from the live FPL API.
+- **Defensive-contribution features** — 6 new lag-safe rolling features (`defensive_contribution_last_3/5`, `defensive_contribution_per_90_last_3`, `tackles_last_3`, `recoveries_last_3`, `clearances_blocks_interceptions_last_3`) now that FPL awards defensive-contribution points. The raw stats were always in the data; they were never engineered before.
+- **Time-based early-stopping holdout** in final training (most recent GWs), replacing the previous split that effectively validated on the last 10% of a name-sorted frame.
+- **Data bugs fixed** — a price-unit mix-up in the source feed (£m vs tenths) had corrupted the `value` feature in 5,000+ shipped rows; web-name collisions in ingest silently dropped players (ingest now keys by element ID); stale all-NaN rolling features for the newest season were recomputed.
+- `opponent_strength` was pruned from the feature set (<50% coverage in a from-raw rebuild; its `pos_x_opp_strength` interaction is retained). `starts_per_90` remains unused.
+- Model metadata (`models/xgb_history_v2_metadata.json`) is regenerated from measured results only.
+
+Walk-forward numbers for 2024-25 / 2025-26 below come from `analysis/compute_cv_metrics.py` on `data/processed_fpl_data.csv`. Re-run anytime to regenerate JSON under `models/`.
 
 ### How metrics are defined
 
@@ -72,6 +81,28 @@ All walk-forward numbers below come from `analysis/compute_cv_metrics.py` on `da
 - **Top-K precision** — overlap of model's predicted top-K scorers with actual top-K scorers **across the full player pool** that GW:  
   `|top_K(pred) ∩ top_K(actual)| / K`  
   This measures **pick identification quality**, not end-to-end squad selection from a fixed 15-man team (that backtest is not stored).
+
+### 2026-27 — GW3–7 (5 folds, production model v2.1)
+
+Train = all prior seasons (2022-23 → 2025-26) + 2026-27 rows with `GW < test_GW`. Early-season folds are intrinsically harder (thin in-season form data), so these are **not like-for-like** with the full-season windows below.
+
+```bash
+python scripts/train_gw8_update.py
+# → models/cv_metrics_2026-27_gw3_7.json
+# cross-check: python analysis/compute_cv_metrics.py --test-season 2026-27
+# → models/cv_metrics_2026-27_gw3_7_standard.json (MAE 1.189, Spearman 0.719)
+```
+
+| Metric | Mean |
+|--------|-----:|
+| MAE | **1.150** pts |
+| RMSE | **2.082** pts |
+| R² | **0.314** |
+| Spearman ρ | **0.707** |
+| Top-10 precision | **12.0%** |
+| Top-30 precision | **23.3%** |
+
+Trained on **106,546 rows** (seasons 2022-23 → 2026-27 GW1-7). Per-gameweek breakdowns are in `models/cv_metrics_2026-27_gw3_7.json` (`per_gw` array).
 
 ### 2024-25 — GW10–38 (29 folds, processed CSV only)
 
@@ -122,6 +153,9 @@ Optional flags: `--played-only` (exclude 0-minute assets), `--precision-k 5`.
 | Script | Purpose |
 |--------|---------|
 | `train_with_history.py` | Multi-season history-aware training → `xgb_history_v2.pkl` + metadata |
+| `scripts/train_gw8_update.py` | 2026-27 retrain (v2.1) with walk-forward CV → model + `models/cv_metrics_2026-27_gw3_7.json` |
+| `scripts/ingest_2026_27.py` | Backfill 2026-27 GWs into `processed_fpl_data.csv` (element-ID keyed) |
+| `scripts/predict_gw8.py` | GW predictions + ranked player list from the current model |
 | `analysis/compute_cv_metrics.py` | Reproducible walk-forward CV (no extra downloads) |
 | `update_data.py` | Merge latest GW into `processed_fpl_data.csv` (also runs on GitHub Actions schedule) |
 
@@ -282,4 +316,4 @@ Live picks, bootstrap, and fixtures: [Fantasy Premier League API](https://fantas
 
 ---
 
-*Pitchcraft / FPL Optimizer — Agentic AI — 2025-26*
+*Pitchcraft / FPL Optimizer — Agentic AI — 2026-27*
